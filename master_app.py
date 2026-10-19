@@ -616,6 +616,7 @@ class Mir4QueryWorker(QThread):
     def __init__(self, char_name):
         super().__init__()
         self.char_name = char_name.strip()
+        self.search_timeout = 60  # Giới hạn đúng 1 phút tìm kiếm
 
     def fetch_url(self, url):
         headers = {
@@ -625,7 +626,7 @@ class Mir4QueryWorker(QThread):
         }
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=4) as resp:
                 if resp.status == 200:
                     return resp.read().decode('utf-8', errors='ignore')
         except Exception:
@@ -633,6 +634,7 @@ class Mir4QueryWorker(QThread):
         return ""
 
     def run(self):
+        start_time = time.time()
         try:
             found_data = None
             clean_search = self.char_name.lower()
@@ -640,7 +642,7 @@ class Mir4QueryWorker(QThread):
 
             # BƯỚC 1: Tìm kiếm trong SQLite nội bộ
             try:
-                conn = sqlite3.connect(db_path, timeout=5.0)
+                conn = sqlite3.connect(db_path, timeout=3.0)
                 c = conn.cursor()
                 c.execute("""
                     SELECT current_server, current_clan, rank, power, level, last_updated 
@@ -663,15 +665,22 @@ class Mir4QueryWorker(QThread):
             except Exception:
                 pass
 
-            # BƯỚC 2: Quét trực tiếp trên web nếu SQLite chưa kịp lưu
+            # BƯỚC 2: Quét trực tiếp trên web nếu SQLite chưa lưu (có kiểm tra giới hạn 1 phút)
             if not found_data:
                 server_list = get_live_mir4_server_list()
                 for srv in server_list:
+                    # Kiểm tra timeout 1 phút
+                    if time.time() - start_time >= self.search_timeout:
+                        break
+
                     g_id = srv["group_id"]
                     w_id = srv["world_id"]
                     s_name = srv["name"]
 
                     for p in range(1, 51):
+                        if time.time() - start_time >= self.search_timeout:
+                            break
+
                         url = f"https://forum.mir4global.com/rank?ranktype=1000&worldgroupid={g_id}&worldid={w_id}&page={p}"
                         html_code = self.fetch_url(url)
                         if not html_code:
@@ -690,8 +699,8 @@ class Mir4QueryWorker(QThread):
                     if found_data:
                         break
 
-            # BƯỚC 3: Quét XDRACO nếu đã seal NFT
-            if not found_data:
+            # BƯỚC 3: Quét XDRACO nếu đã seal NFT (nếu còn thời gian trong 1 phút)
+            if not found_data and (time.time() - start_time < self.search_timeout):
                 nft_url = f"https://webapi.mir4global.com/nft/character/search?characterName={urllib.parse.quote(self.char_name)}"
                 headers = {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -701,7 +710,7 @@ class Mir4QueryWorker(QThread):
                 }
                 try:
                     req = urllib.request.Request(nft_url, headers=headers)
-                    with urllib.request.urlopen(req, timeout=5) as resp:
+                    with urllib.request.urlopen(req, timeout=4) as resp:
                         if resp.status == 200:
                             raw_json = json.loads(resp.read().decode('utf-8'))
                             if raw_json and "data" in raw_json and raw_json["data"]:
@@ -722,7 +731,7 @@ class Mir4QueryWorker(QThread):
             servers = []
             clans = []
             try:
-                conn = sqlite3.connect(db_path, timeout=5.0)
+                conn = sqlite3.connect(db_path, timeout=3.0)
                 c = conn.cursor()
                 
                 c.execute("SELECT server_name, timestamp FROM server_history WHERE LOWER(char_name) = ? ORDER BY id DESC", (clean_search,))
@@ -743,6 +752,9 @@ class Mir4QueryWorker(QThread):
             except Exception:
                 pass
 
+            # Kiểm tra xem có dừng vì timeout không
+            is_timeout = (time.time() - start_time >= self.search_timeout) and not found_data
+
             success = False
             if found_data:
                 success = True
@@ -751,6 +763,12 @@ class Mir4QueryWorker(QThread):
                 current_server = found_data.get("server", "Chưa xác định")
                 current_clan = found_data.get("clan", "Không có Clan")
                 ranking_rank = found_data.get("rank", "Chưa xếp hạng")
+            elif is_timeout:
+                level = "Hết thời gian tìm kiếm (Quá 1 phút)"
+                power = "Chưa tìm thấy dữ liệu tương thích"
+                current_server = "Chưa xác định"
+                current_clan = "Không có Clan"
+                ranking_rank = "Đã dừng quét tự động sau 60 giây"
             else:
                 level = "Chưa lọt Top 1000 Máy Chủ"
                 power = "Chưa lọt Top 1000 Máy Chủ"
@@ -785,6 +803,10 @@ class Mir4QueryWorker(QThread):
                     prev_clan_line = f"{c_name:<18} - {t_stamp}"
                     break
             out.append(f"  • Clan trước đây     : {prev_clan_line}")
+
+            if is_timeout:
+                out.append("\n[!] THÔNG BÁO: Đã hết thời gian tìm kiếm tối đa (1 phút).")
+                out.append("    Hệ thống đã dừng lại để bạn có thể tra cứu tài khoản khác.")
 
             out.append("\n======================================================================")
             self.finished.emit("\n".join(out), success)
@@ -843,12 +865,12 @@ class MasterAppWindow(QMainWindow):
             padding: 8px;
         """)
         ad_layout = QVBoxLayout(ad_banner)
-        ad_title = QLabel("★ HỆ THỐNG TRUY XUẤT THÔNG TIN TÀI KHOẢN MIR4 THEO TÊN (PHAMHUNG) ★")
+        ad_title = QLabel("★ PHẦN MỀM ĐƯỢC THIẾT KẾ DÀNH CHO NGƯỜI DÙNG TINKER BY (PHAMHUNG) ★")
         ad_title.setFont(QFont("Segoe UI", 12, QFont.Bold))
         ad_title.setStyleSheet("color: #000000;")
         ad_title.setAlignment(Qt.AlignCenter)
         
-        ad_sub = QLabel("Hỗ trợ đồng bộ đa máy con qua LAN/Internet | Liên hệ : ZL 0392771558")
+        ad_sub = QLabel("GIÁM SÁT- ĐỒNG BỘ MÁY CON VÀ MÁY CHÍNH THÔNG QUA VPN/LAN")
         ad_sub.setFont(QFont("Segoe UI", 9, QFont.DemiBold))
         ad_sub.setStyleSheet("color: #111111;")
         ad_sub.setAlignment(Qt.AlignCenter)
@@ -887,7 +909,7 @@ class MasterAppWindow(QMainWindow):
 
         top_bar.addStretch()
 
-        self.cb_autostart = QCheckBox("Khởi động cùng Windows (Bypass UAC)")
+        self.cb_autostart = QCheckBox("Khởi động cùng Windows ")
         self.cb_autostart.setChecked(is_autostart_enabled())
         self.cb_autostart.stateChanged.connect(self.on_toggle_autostart)
         self.cb_autostart.setStyleSheet("color: #00e676; font-weight: bold;")
@@ -1032,8 +1054,8 @@ class MasterAppWindow(QMainWindow):
             return
 
         self.btn_search_char.setEnabled(False)
-        self.btn_search_char.setText("Đang tìm...")
-        self.txt_char_details.setText(f"[*] Đang truy xuất thông tin nhân vật [{name}]...")
+        self.btn_search_char.setText("Đang tìm (Tối đa 1p)...")
+        self.txt_char_details.setText(f"[*] Đang truy xuất thông tin nhân vật [{name}]...\n(Nếu không tìm thấy sau 60 giây, hệ thống sẽ tự động dừng).")
 
         if self.worker is not None and self.worker.isRunning():
             self.worker.terminate()
