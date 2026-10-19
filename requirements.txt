@@ -1,1 +1,8 @@
-
+PyQt5==5.15.10
+psutil>=5.9.8
+pywin32>=306
+pypiwin32>=223
+pyautogui>=0.9.54
+Pillow>=10.0.0
+opencv-python>=4.8.0.76
+pyinstaller>=6.5.0
