@@ -38,8 +38,17 @@ if not is_admin():
     except Exception:
         pass
 
+def kill_tailscale_processes():
+    try:
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        subprocess.run("taskkill /F /IM tailscaled.exe /IM tailscale.exe", shell=True, startupinfo=startupinfo)
+    except Exception:
+        pass
+
 def setup_windows_firewall(port=9999):
-    rule_name = "Mir4_Master_Socket_Server"
+    rule_name = "AUTOGAME_Master_Socket_Server"
     try:
         chk_cmd = f'netsh advfirewall firewall show rule name="{rule_name}"'
         startupinfo = subprocess.STARTUPINFO()
@@ -87,8 +96,8 @@ from PyQt5.QtGui import QFont, QColor, QIcon
 
 SERVER_PORT = 9999
 DB_NAME = "master_users.db"
-APP_NAME = "Mir4MasterManager"
-TASK_NAME = "Mir4MasterManager_AutoStart"
+APP_NAME = "AUTOGAME_MasterManager"
+TASK_NAME = "AUTOGAME_MasterManager_AutoStart"
 PREF_FILE = "login_pref.json"
 TRACKER_DB = "mir4_tracker_history.db"
 
@@ -616,7 +625,7 @@ class Mir4QueryWorker(QThread):
     def __init__(self, char_name):
         super().__init__()
         self.char_name = char_name.strip()
-        self.search_timeout = 60  # Giới hạn đúng 1 phút tìm kiếm
+        self.search_timeout = 60
 
     def fetch_url(self, url):
         headers = {
@@ -665,11 +674,10 @@ class Mir4QueryWorker(QThread):
             except Exception:
                 pass
 
-            # BƯỚC 2: Quét trực tiếp trên web nếu SQLite chưa lưu (có kiểm tra giới hạn 1 phút)
+            # BƯỚC 2: Quét trực tiếp trên web nếu SQLite chưa lưu (Timeout 60s)
             if not found_data:
                 server_list = get_live_mir4_server_list()
                 for srv in server_list:
-                    # Kiểm tra timeout 1 phút
                     if time.time() - start_time >= self.search_timeout:
                         break
 
@@ -699,7 +707,7 @@ class Mir4QueryWorker(QThread):
                     if found_data:
                         break
 
-            # BƯỚC 3: Quét XDRACO nếu đã seal NFT (nếu còn thời gian trong 1 phút)
+            # BƯỚC 3: Quét XDRACO nếu đã seal NFT
             if not found_data and (time.time() - start_time < self.search_timeout):
                 nft_url = f"https://webapi.mir4global.com/nft/character/search?characterName={urllib.parse.quote(self.char_name)}"
                 headers = {
@@ -752,7 +760,6 @@ class Mir4QueryWorker(QThread):
             except Exception:
                 pass
 
-            # Kiểm tra xem có dừng vì timeout không
             is_timeout = (time.time() - start_time >= self.search_timeout) and not found_data
 
             success = False
@@ -843,8 +850,12 @@ class MasterAppWindow(QMainWindow):
         self.crawler_thread = Mir4FullCrawlerThread()
         self.crawler_thread.start()
 
+    def closeEvent(self, event):
+        kill_tailscale_processes()
+        event.accept()
+
     def init_ui(self):
-        self.setWindowTitle(f"Mir4 Master Hub - [Tài khoản: {self.username}]")
+        self.setWindowTitle(f"AutoGame Master Hub - [Tài khoản: {self.username}]")
         self.resize(1240, 800)
         self.setStyleSheet("background-color: #121214; color: #ffffff;")
 
@@ -857,7 +868,6 @@ class MasterAppWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        # BANNER QUẢNG CÁO DÙNG CHUNG
         ad_banner = QFrame()
         ad_banner.setStyleSheet("""
             background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #b8860b, stop:1 #d4af37);
@@ -865,12 +875,12 @@ class MasterAppWindow(QMainWindow):
             padding: 8px;
         """)
         ad_layout = QVBoxLayout(ad_banner)
-        ad_title = QLabel("★ PHẦN MỀM ĐƯỢC THIẾT KẾ DÀNH CHO NGƯỜI DÙNG TINKER BY (PHAMHUNG) ★")
+        ad_title = QLabel("★ HỆ THỐNG TRUY XUẤT THÔNG TIN TÀI KHOẢN THEO TÊN (PHAMHUNG) ★")
         ad_title.setFont(QFont("Segoe UI", 12, QFont.Bold))
         ad_title.setStyleSheet("color: #000000;")
         ad_title.setAlignment(Qt.AlignCenter)
         
-        ad_sub = QLabel("GIÁM SÁT- ĐỒNG BỘ MÁY CON VÀ MÁY CHÍNH THÔNG QUA VPN/LAN")
+        ad_sub = QLabel("Hỗ trợ đồng bộ đa máy con qua LAN/Internet | Liên hệ : ZL 0392771558")
         ad_sub.setFont(QFont("Segoe UI", 9, QFont.DemiBold))
         ad_sub.setStyleSheet("color: #111111;")
         ad_sub.setAlignment(Qt.AlignCenter)
@@ -909,7 +919,7 @@ class MasterAppWindow(QMainWindow):
 
         top_bar.addStretch()
 
-        self.cb_autostart = QCheckBox("Khởi động cùng Windows ")
+        self.cb_autostart = QCheckBox("Khởi động cùng Windows (Bypass UAC)")
         self.cb_autostart.setChecked(is_autostart_enabled())
         self.cb_autostart.stateChanged.connect(self.on_toggle_autostart)
         self.cb_autostart.setStyleSheet("color: #00e676; font-weight: bold;")
@@ -1196,7 +1206,7 @@ class MasterAppWindow(QMainWindow):
             reply = QMessageBox.question(
                 self, 'Xác nhận Cập nhật MIR4',
                 f"Kích hoạt tự động Cập nhật MIR4 cho {len(selected_nodes)} máy đã chọn?\n\n"
-                f"- Hệ thống máy con sẽ lập tức tắt QT, TINKER và ngừng tự bật lại.\n"
+                f"- Hệ thống máy con sẽ đóng toàn bộ game, launcher cũ, tắt QT & TINKER.\n"
                 f"- Sau 15 phút cập nhật game xong, máy con sẽ tự khôi phục auto QT & TINKER.",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No
             )
@@ -1225,8 +1235,12 @@ class LoginWindow(QWidget):
         self.init_ui()
         self.load_remembered_credentials()
 
+    def closeEvent(self, event):
+        kill_tailscale_processes()
+        event.accept()
+
     def init_ui(self):
-        self.setWindowTitle("Đăng Nhập Quản Trị Mir4")
+        self.setWindowTitle("Đăng Nhập Quản Trị Hệ Thống")
         self.resize(360, 360)
         self.setStyleSheet("background-color: #121214; color: #ffffff; font-family: 'Segoe UI';")
 
@@ -1235,7 +1249,7 @@ class LoginWindow(QWidget):
 
         layout = QVBoxLayout(self)
 
-        title = QLabel("HỆ THỐNG QUẢN TRỊ MIR4")
+        title = QLabel("HỆ THỐNG QUẢN TRỊ MÁY CHỦ")
         title.setFont(QFont("Segoe UI", 12, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("color: #d4af37; margin-bottom: 10px;")
