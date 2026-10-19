@@ -157,17 +157,9 @@ def kill_process_by_path(target_path):
     except Exception:
         pass
 
-def kill_all_mir4_game_and_launcher():
-    keywords = ["mir mobile", "mirmobile", "mir4g", "mir4client", "mir4launcher", "mir4"]
-    for proc in psutil.process_iter(["pid", "name"]):
-        try:
-            pname = proc.info["name"].lower() if proc.info["name"] else ""
-            for kw in keywords:
-                if kw in pname:
-                    proc.kill()
-                    break
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
+def show_desktop_screen():
+    pyautogui.hotkey("win", "d")
+    time.sleep(1.5)
 
 def set_task_scheduler_autostart(enable=True):
     startupinfo = subprocess.STARTUPINFO()
@@ -593,7 +585,7 @@ class MasterApp(QMainWindow):
         h_tinker.addWidget(btn_run_tinker)
         boot_box_layout.addLayout(h_tinker)
 
-        # 3. LAUNCHER MIR4 (TỰ ĐỘNG CẬP NHẬT TỪ XA - KHÔNG CÓ NÚT BẤM CHẠY TẠI ĐÂY)
+        # 3. LAUNCHER MIR4 (CHỈ NHẬN LỆNH TỪ MÁY CHÍNH)
         h_launcher_title = QHBoxLayout()
         lbl_launcher = QLabel("3. Launcher MIR4 (Chỉ nhận lệnh cập nhật từ Máy Chính):")
         lbl_launcher.setStyleSheet("border: none; font-weight: bold; color: #ffd700; font-size: 14px;")
@@ -858,7 +850,7 @@ class MasterApp(QMainWindow):
         self.is_updating_mir4 = True
         self.net_signals.update_progress_changed.emit("Đang tắt QT & TINKER để chuẩn bị cập nhật...")
 
-        # 1. Tắt QT & TINKER và ngừng watchdog
+        # 1. Đóng tiến trình QT & TINKER
         kill_process_by_path(self.txt_qt.text().strip())
         kill_process_by_path(self.txt_tinker.text().strip())
 
@@ -882,20 +874,16 @@ class MasterApp(QMainWindow):
             return
 
         try:
-            # 2. Thu nhỏ cửa sổ về Desktop
-            pyautogui.hotkey("win", "d")
-            time.sleep(1.5)
+            # 2. CHỈ THU NHỎ TẤT CẢ CỬA SỔ XUỐNG DESKTOP (WIN + D)
+            self.net_signals.update_progress_changed.emit("Thu nhỏ toàn bộ cửa sổ xuống Desktop...")
+            show_desktop_screen()
 
-            # 3. Kill game và launcher cũ
-            kill_all_mir4_game_and_launcher()
-            time.sleep(1.5)
-
-            # 4. Mở Launcher MIR4 qua UAC Bypass
+            # 3. Mở Launcher MIR4 qua UAC Bypass
             self.net_signals.update_progress_changed.emit("Đang khởi chạy Mir4Launcher (Bypass UAC)...")
             launcher_dir = os.path.dirname(launcher_path)
             ctypes.windll.shell32.ShellExecuteW(None, "runas", launcher_path, "", launcher_dir, 1)
 
-            # Đợi launcher mở
+            # Chờ Launcher mở
             for sec in range(45, 0, -5):
                 if not self.is_updating_mir4:
                     return
@@ -907,7 +895,7 @@ class MasterApp(QMainWindow):
             ingame_img = resource_path("ingame_start_btn.png")
             confirm_img = resource_path("confirm_btn.png")
 
-            # 5. Kiểm tra Install / Game Start
+            # 4. Kiểm tra Install / Game Start
             pos_game_start = self.locate_screen_image(game_start_img, confidence=0.75)
             if not pos_game_start:
                 pos_install = self.locate_screen_image(install_img, confidence=0.75)
@@ -919,14 +907,14 @@ class MasterApp(QMainWindow):
             if not clicked_game:
                 self.net_signals.update_progress_changed.emit("Cảnh báo: Không click được nút Game Start Launcher!")
 
-            # 6. Chờ vào game
+            # 5. Chờ vào game
             for sec in range(60, 0, -5):
                 if not self.is_updating_mir4:
                     return
                 self.net_signals.update_progress_changed.emit(f"Chờ cửa sổ game xuất hiện ({sec}s)...")
                 time.sleep(5)
 
-            # 7. Click Start Game in-game
+            # 6. Click Start Game in-game
             clicked_start = False
             if os.path.exists(ingame_img):
                 clicked_start = self.find_and_click_image(ingame_img, timeout=35)
@@ -934,7 +922,7 @@ class MasterApp(QMainWindow):
                 sw, sh = pyautogui.size()
                 pyautogui.click(sw // 2, int(sh * 0.67))
 
-            # 8. Chờ 10s hiện bảng xác nhận cập nhật
+            # 7. Chờ 10s hiện bảng xác nhận cập nhật
             time.sleep(10)
             clicked_confirm = False
             if os.path.exists(confirm_img):
@@ -943,7 +931,7 @@ class MasterApp(QMainWindow):
                 sw, sh = pyautogui.size()
                 pyautogui.click(int(sw * 0.565), int(sh * 0.670))
 
-            # 9. CHỜ 15 PHÚT TẢI PATCH GAME
+            # 8. CHỜ 15 PHÚT TẢI BẢN VÁ GAME
             for remaining in range(900, 0, -5):
                 if not self.is_updating_mir4:
                     return
@@ -951,17 +939,16 @@ class MasterApp(QMainWindow):
                 self.net_signals.update_progress_changed.emit(f"Đang tải bản cập nhật MIR4 (Còn {m}p {s}s)...")
                 time.sleep(5)
 
-            # 10. Hoàn tất cập nhật: kill game & launcher
-            self.net_signals.update_progress_changed.emit("Hết 15 phút cập nhật! Đang dọn dẹp game...")
-            kill_all_mir4_game_and_launcher()
-            time.sleep(2)
+            # 9. Hoàn tất 15 phút: CHỈ SHOW DESKTOP
+            self.net_signals.update_progress_changed.emit("Hết 15 phút cập nhật! Thu nhỏ màn hình về Desktop...")
+            show_desktop_screen()
 
         except Exception as e:
             self.net_signals.update_progress_changed.emit(f"Lỗi update: {str(e)}")
         finally:
             self.is_updating_mir4 = False
             self.net_signals.update_progress_changed.emit("Đã hoàn tất update. Khôi phục tự động bật QT & TINKER.")
-            # 11. Khôi phục tự động bật lại QT và Tinker
+            # 10. Khôi phục tự động chạy lại QT và Tinker
             if self.config.get("auto_start_apps", True):
                 QTimer.singleShot(2000, self.auto_start_both_silent)
 
