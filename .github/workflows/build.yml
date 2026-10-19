@@ -1,0 +1,103 @@
+name: Build Standalone Windows EXE
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        python -c "import win32gui, pyautogui; print('All libraries ready')"
+
+    - name: Download and Extract Tailscale Binaries
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path "tailscale_bin"
+        New-Item -ItemType Directory -Force -Path "ts_temp"
+        
+        Write-Host "Dang tai Tailscale MSI tu may chu..."
+        Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-1.104.1-amd64.msi" -OutFile "ts_temp/tailscale.msi"
+        
+        Write-Host "Dang trich xuat 3 file loi..."
+        Start-Process msiexec.exe -ArgumentList "/a ts_temp\tailscale.msi /qb TARGETDIR=$PWD\ts_temp\extracted" -Wait
+        
+        $extractedPath = Get-ChildItem -Path "ts_temp\extracted" -Recurse -Filter "tailscaled.exe" | Select-Object -First 1 -ExpandProperty DirectoryName
+        Copy-Item "$extractedPath\tailscale.exe" -Destination "tailscale_bin\"
+        Copy-Item "$extractedPath\tailscaled.exe" -Destination "tailscale_bin\"
+        Copy-Item "$extractedPath\wintun.dll" -Destination "tailscale_bin\"
+        
+        Write-Host "Cac file Tailscale da san sang trong tailscale_bin:"
+        Get-ChildItem "tailscale_bin"
+
+    - name: Build Master App EXE
+      shell: pwsh
+      run: |
+        $iconArg = @()
+        if (Test-Path "app_icon.ico") {
+          $iconArg = @('--icon', 'app_icon.ico', '--add-data', 'app_icon.ico;.')
+        }
+        pyinstaller --noconfirm --onedir --windowed --uac-admin `
+          --name "Mir4_Master_Manager" `
+          @iconArg `
+          --hidden-import win32gui `
+          --hidden-import win32process `
+          --hidden-import win32con `
+          --hidden-import sqlite3 `
+          --add-binary "tailscale_bin/*;tailscale_bin" `
+          --clean master_app.py
+
+    - name: Build Node Client EXE
+      shell: pwsh
+      run: |
+        $iconArg = @()
+        if (Test-Path "app_icon.ico") {
+          $iconArg = @('--icon', 'app_icon.ico', '--add-data', 'app_icon.ico;.')
+        }
+        pyinstaller --noconfirm --onefile --windowed --uac-admin `
+          --name "Mir4_Node_Agent" `
+          @iconArg `
+          --hidden-import win32gui `
+          --hidden-import win32process `
+          --hidden-import win32con `
+          --hidden-import win32ui `
+          --hidden-import pyautogui `
+          --hidden-import PIL `
+          --hidden-import cv2 `
+          --add-data "install_btn.png;." `
+          --add-data "game_start_btn.png;." `
+          --add-data "ingame_start_btn.png;." `
+          --add-data "confirm_btn.png;." `
+          --add-binary "tailscale_bin/*;tailscale_bin" `
+          --clean node_client.py
+
+    - name: Archive Master App
+      shell: pwsh
+      run: |
+        Compress-Archive -Path dist/Mir4_Master_Manager -DestinationPath dist/Mir4_Master_Manager.zip
+
+    - name: Upload Master App Build
+      uses: actions/upload-artifact@v4
+      with:
+        name: Mir4_Master_Manager_Windows
+        path: dist/Mir4_Master_Manager.zip
+
+    - name: Upload Node Agent Build
+      uses: actions/upload-artifact@v4
+      with:
+        name: Mir4_Node_Agent_Windows
+        path: dist/Mir4_Node_Agent.exe
