@@ -18,6 +18,39 @@ from datetime import datetime
 
 from embedded_tailscale import EmbeddedTailscale
 
+# ==================== CẤU HÌNH BẢN QUYỀN KEY ====================
+MASTER_LICENSE_KEY = "PHAMHUNG"
+LICENSE_FILE = "license.lic"
+
+def verify_license_key(key_str: str) -> bool:
+    if not key_str:
+        return False
+    return key_str.strip() == MASTER_LICENSE_KEY
+
+def is_license_activated() -> bool:
+    lic_path = os.path.join(get_app_dir(), LICENSE_FILE)
+    if not os.path.exists(lic_path):
+        return False
+    try:
+        with open(lic_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            saved_token = data.get("token", "")
+            expected_token = hashlib.sha256(MASTER_LICENSE_KEY.encode('utf-8')).hexdigest()
+            return saved_token == expected_token
+    except Exception:
+        return False
+
+def save_license_activation(key_str: str):
+    lic_path = os.path.join(get_app_dir(), LICENSE_FILE)
+    try:
+        token = hashlib.sha256(key_str.strip().encode('utf-8')).hexdigest()
+        with open(lic_path, "w", encoding="utf-8") as f:
+            json.dump({"token": token, "activated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, f)
+    except Exception:
+        pass
+
+# ==================== HỆ THỐNG & WINDOWS API ====================
+
 def is_admin():
     try:
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
@@ -145,9 +178,17 @@ def init_tracker_db():
                     server_name TEXT,
                     timestamp TEXT
                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS name_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    old_name TEXT,
+                    new_name TEXT,
+                    server_name TEXT,
+                    timestamp TEXT
+                )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_char_name ON characters(char_name);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_char_clan_hist ON clan_history(char_name);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_char_srv_hist ON server_history(char_name);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_char_name_hist ON name_history(old_name, new_name);")
     conn.commit()
     conn.close()
 
@@ -160,9 +201,11 @@ def prune_old_tracker_records(conn=None):
             should_close = True
 
         c = conn.cursor()
-        c.execute("DELETE FROM clan_history WHERE timestamp < datetime('now', '-100 days')")
-        c.execute("DELETE FROM server_history WHERE timestamp < datetime('now', '-100 days')")
-        c.execute("DELETE FROM characters WHERE last_updated < datetime('now', '-100 days')")
+        # Lưu trữ trong 180 ngày, xóa bản ghi từ ngày 181 trở đi
+        c.execute("DELETE FROM clan_history WHERE timestamp < datetime('now', '-180 days')")
+        c.execute("DELETE FROM server_history WHERE timestamp < datetime('now', '-180 days')")
+        c.execute("DELETE FROM name_history WHERE timestamp < datetime('now', '-180 days')")
+        c.execute("DELETE FROM characters WHERE last_updated < datetime('now', '-180 days')")
         conn.commit()
     except Exception:
         pass
@@ -262,6 +305,8 @@ def is_autostart_enabled():
     except Exception:
         return False
 
+# ==================== SOCKET MASTER SERVER ====================
+
 class MasterServerSignals(QObject):
     client_updated = pyqtSignal(dict)
     client_disconnected = pyqtSignal(str)
@@ -319,10 +364,10 @@ class MasterServer(threading.Thread):
                     with self.lock:
                         self.active_sockets[client_id] = conn
 
-                    qt_val = payload.get("qt", False)
+                    qt_val = payload.get("qt", payload.get("qt_status", False))
                     qt_status = qt_val if isinstance(qt_val, str) else ("ON" if qt_val else "OFF")
 
-                    tinker_val = payload.get("tinker", False)
+                    tinker_val = payload.get("tinker", payload.get("tinker_status", False))
                     tinker_status = tinker_val if isinstance(tinker_val, str) else ("ON" if tinker_val else "OFF")
 
                     node_data = {
@@ -357,7 +402,7 @@ class MasterServer(threading.Thread):
                     return False
         return False
 
-# ==================== MODULE BÓC TÁCH MÁY CHỦ MIR4 ====================
+# ==================== MODULE BÓC TÁCH & LỊCH SỬ MIR4 ====================
 
 def get_live_mir4_server_list():
     headers = {
@@ -617,7 +662,7 @@ class Mir4FullCrawlerThread(threading.Thread):
                     break
                 time.sleep(100)
 
-# ==================== LUỒNG TRUY VẤN TÌM KIẾM THEO TÊN (LIVE FALLBACK) ====================
+# ==================== LUỒNG TRUY VẤN TÌM KIẾM THEO TÊN ====================
 
 class Mir4QueryWorker(QThread):
     finished = pyqtSignal(str, bool)
@@ -674,7 +719,7 @@ class Mir4QueryWorker(QThread):
             except Exception:
                 pass
 
-            # BƯỚC 2: Quét trực tiếp trên web nếu SQLite chưa lưu (Timeout 60s)
+            # BƯỚC 2: Quét trực tiếp trên web nếu SQLite chưa lưu
             if not found_data:
                 server_list = get_live_mir4_server_list()
                 for srv in server_list:
@@ -738,10 +783,12 @@ class Mir4QueryWorker(QThread):
             # BƯỚC 4: Lấy danh sách lịch sử THAY ĐỔI
             servers = []
             clans = []
+            names = []
             try:
                 conn = sqlite3.connect(db_path, timeout=3.0)
                 c = conn.cursor()
                 
+                # Lịch sử Server
                 c.execute("SELECT server_name, timestamp FROM server_history WHERE LOWER(char_name) = ? ORDER BY id DESC", (clean_search,))
                 raw_srv = c.fetchall()
                 for s_name, t_stamp in raw_srv:
@@ -749,12 +796,19 @@ class Mir4QueryWorker(QThread):
                         if not servers or servers[-1][0].lower() != s_name.lower():
                             servers.append((s_name, t_stamp))
 
+                # Lịch sử Clan
                 c.execute("SELECT clan_name, timestamp FROM clan_history WHERE LOWER(char_name) = ? ORDER BY id DESC", (clean_search,))
                 raw_cln = c.fetchall()
                 for c_name, t_stamp in raw_cln:
                     if c_name and c_name != "Không có Clan":
                         if not clans or clans[-1][0].lower() != c_name.lower():
                             clans.append((c_name, t_stamp))
+
+                # Lịch sử Tên
+                c.execute("SELECT old_name, new_name, timestamp FROM name_history WHERE LOWER(old_name) = ? OR LOWER(new_name) = ? ORDER BY id DESC", (clean_search, clean_search))
+                raw_names = c.fetchall()
+                for o_name, n_name, t_stamp in raw_names:
+                    names.append((o_name, n_name, t_stamp))
 
                 conn.close()
             except Exception:
@@ -793,23 +847,33 @@ class Mir4QueryWorker(QThread):
             out.append(f" CẤP ĐỘ (LEVEL)     : {level}")
             out.append("======================================================================")
             
-            out.append("\n[+] LỊCH SỬ MÁY CHỦ (SERVER HISTORY):")
+            # --- LỊCH SỬ MÁY CHỦ ---
+            out.append("\n[+] LỊCH SỬ MÁY CHỦ:")
             out.append(f"  • Máy chủ hiện tại   : {current_server}")
             prev_server_line = "Chưa ghi nhận thay đổi máy chủ"
             for s_name, t_stamp in servers:
                 if s_name.strip().lower() != current_server.strip().lower() and s_name != "Chưa xác định":
-                    prev_server_line = f"{s_name:<18} - {t_stamp}"
+                    prev_server_line = f"{s_name} - {t_stamp}"
                     break
             out.append(f"  • Máy chủ trước đây  : {prev_server_line}")
 
-            out.append("\n[+] LỊCH SỬ CLAN (CLAN HISTORY):")
+            # --- LỊCH SỬ CLAN ---
+            out.append("\n[+] LỊCH SỬ CLAN:")
             out.append(f"  • Clan hiện tại      : {current_clan}")
             prev_clan_line = "Chưa ghi nhận thay đổi Clan"
             for c_name, t_stamp in clans:
                 if c_name.strip().lower() != current_clan.strip().lower() and c_name != "Không có Clan":
-                    prev_clan_line = f"{c_name:<18} - {t_stamp}"
+                    prev_clan_line = f"{c_name} - {t_stamp}"
                     break
             out.append(f"  • Clan trước đây     : {prev_clan_line}")
+
+            # --- LỊCH SỬ ĐỔI TÊN ---
+            out.append("\n[+] LỊCH SỬ ĐỔI TÊN:")
+            if names:
+                for o_name, n_name, t_stamp in names[:5]:
+                    out.append(f"  • {o_name} ➔ {n_name} ({t_stamp})")
+            else:
+                out.append("  • Chưa ghi nhận lần đổi tên nào")
 
             if is_timeout:
                 out.append("\n[!] THÔNG BÁO: Đã hết thời gian tìm kiếm tối đa (1 phút).")
@@ -1228,6 +1292,64 @@ class MasterAppWindow(QMainWindow):
         else:
             QMessageBox.warning(self, "Lỗi", "Không thể cập nhật cấu hình khởi động!")
 
+# ==================== GIAO DIỆN XÁC THỰC BẢN QUYỀN KEY ====================
+
+class LicenseActivationWindow(QWidget):
+    def __init__(self, on_success):
+        super().__init__()
+        self.on_success = on_success
+        self.setWindowTitle("Kích Hoạt Bản Quyền Hệ Thống (PHAMHUNG)")
+        self.resize(430, 240)
+        self.setStyleSheet("background-color: #1a1a20; color: #ffffff; font-family: 'Segoe UI';")
+        
+        if os.path.exists("app_icon.ico"):
+            self.setWindowIcon(QIcon("app_icon.ico"))
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(25, 20, 25, 20)
+        layout.setSpacing(12)
+
+        lbl_title = QLabel("XÁC THỰC KEY BẢN QUYỀN PHẦN MỀM")
+        lbl_title.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        lbl_title.setAlignment(Qt.AlignCenter)
+        lbl_title.setStyleSheet("color: #ff6600;")
+        layout.addWidget(lbl_title)
+
+        lbl_desc = QLabel("Vui lòng nhập Key để mở khóa phần mềm quản trị:")
+        lbl_desc.setFont(QFont("Segoe UI", 9))
+        lbl_desc.setStyleSheet("color: #bbb;")
+        layout.addWidget(lbl_desc)
+
+        self.txt_key = QLineEdit()
+        self.txt_key.setPlaceholderText("Nhập License Key kích hoạt...")
+        self.txt_key.setStyleSheet("padding: 9px; border-radius: 4px; background: #24242c; color: #00e5ff; font-weight: bold; border: 1px solid #444;")
+        layout.addWidget(self.txt_key)
+
+        lbl_contact = QLabel("Liên hệ ZL : 0392771558 để nhận key miễn phí")
+        lbl_contact.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        lbl_contact.setAlignment(Qt.AlignCenter)
+        lbl_contact.setStyleSheet("color: #ffd700; margin-top: 2px;")
+        layout.addWidget(lbl_contact)
+
+        self.btn_submit = QPushButton("KÍCH HOẠT")
+        self.btn_submit.setStyleSheet("background-color: #ff6600; color: #fff; font-weight: bold; padding: 10px; border-radius: 4px;")
+        self.btn_submit.clicked.connect(self.check_key)
+        layout.addWidget(self.btn_submit)
+
+    def check_key(self):
+        key = self.txt_key.text().strip()
+        if verify_license_key(key):
+            save_license_activation(key)
+            QMessageBox.information(self, "Thành công", "Kích hoạt bản quyền thành công!")
+            self.close()
+            self.on_success()
+        else:
+            QMessageBox.critical(self, "Lỗi kích hoạt", "Mã Key không chính xác!\nVui lòng liên hệ Zalo 0392771558 để lấy key.")
+
+# ==================== CỬA SỔ ĐĂNG NHẬP MÁY CHỦ ====================
+
 class LoginWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -1324,11 +1446,25 @@ class LoginWindow(QWidget):
         else:
             QMessageBox.warning(self, "Lỗi", msg)
 
+# ==================== ĐIỀU HƯỚNG KHỞI ĐỘNG ====================
+
+login_window_instance = None
+
+def start_main_login():
+    global login_window_instance
+    login_window_instance = LoginWindow()
+    login_window_instance.show()
+
 if __name__ == "__main__":
     setup_windows_firewall(SERVER_PORT)
     init_db()
     init_tracker_db()
     app = QApplication(sys.argv)
-    login = LoginWindow()
-    login.show()
+    
+    if is_license_activated():
+        start_main_login()
+    else:
+        lic_win = LicenseActivationWindow(on_success=start_main_login)
+        lic_win.show()
+
     sys.exit(app.exec_())
