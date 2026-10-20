@@ -28,10 +28,10 @@ PREF_FILE = "login_pref.json"
 TRACKER_DB = "mir4_tracker_history.db"
 LICENSE_FILE = "license.lic"
 
-# YÊU CẦU 1 & 2: MASTER KEY & THÔNG TIN HỖ TRỢ
+# BẢN QUYỀN & THÔNG TIN HỖ TRỢ
 MASTER_KEY = "PHAMHUNG"
 SUPPORT_ZALO = "0392771558"
-MAX_HISTORY_ENTRIES = 5  # Hiển thị tối đa 5 lần đổi
+MAX_HISTORY_ENTRIES = 5  # Hiển thị tối đa 5 lần thay đổi
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -77,20 +77,22 @@ def kill_tailscale_processes():
         pass
 
 def setup_windows_firewall(port=9999):
-    rule_name = "AUTOGAME_Master_Socket_Server"
-    try:
-        chk_cmd = f'netsh advfirewall firewall show rule name="{rule_name}"'
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = subprocess.SW_HIDE
-        res = subprocess.run(chk_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
-        if res.returncode != 0 or rule_name.lower() not in res.stdout.decode('latin1', errors='ignore').lower():
-            in_cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=in action=allow protocol=TCP localport={port}'
-            out_cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=out action=allow protocol=TCP localport={port}'
-            subprocess.run(in_cmd, shell=True, startupinfo=startupinfo)
-            subprocess.run(out_cmd, shell=True, startupinfo=startupinfo)
-    except Exception:
-        pass
+    # Khai báo mở cho cả rule AUTOGAME và Mir4 cũ để đảm bảo máy con kết nối thông suốt
+    rules = ["AUTOGAME_Master_Socket_Server", "Mir4_Master_Socket_Server"]
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    for r_name in rules:
+        try:
+            chk_cmd = f'netsh advfirewall firewall show rule name="{r_name}"'
+            res = subprocess.run(chk_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
+            if res.returncode != 0 or r_name.lower() not in res.stdout.decode('latin1', errors='ignore').lower():
+                in_cmd = f'netsh advfirewall firewall add rule name="{r_name}" dir=in action=allow protocol=TCP localport={port}'
+                out_cmd = f'netsh advfirewall firewall add rule name="{r_name}" dir=out action=allow protocol=TCP localport={port}'
+                subprocess.run(in_cmd, shell=True, startupinfo=startupinfo)
+                subprocess.run(out_cmd, shell=True, startupinfo=startupinfo)
+        except Exception:
+            pass
 
 def get_machine_ips(ts_client=None):
     lan_ip = "127.0.0.1"
@@ -190,7 +192,6 @@ def init_tracker_db():
                     server_name TEXT,
                     timestamp TEXT
                 )''')
-    # BẢNG MỚI: LỊCH SỬ ĐỔI TÊN
     c.execute('''CREATE TABLE IF NOT EXISTS name_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     char_name TEXT,
@@ -205,7 +206,6 @@ def init_tracker_db():
     conn.close()
 
 def prune_old_tracker_records(conn=None):
-    """Lưu trữ dữ liệu trong 180 ngày, tự dọn các bản ghi cũ hơn 180 ngày"""
     should_close = False
     try:
         if conn is None:
@@ -412,7 +412,7 @@ class MasterServer(threading.Thread):
                     return False
         return False
 
-# ==================== MODULE BÓC TÁCH MÁY CHỦ MIR4 (CÓ FALLBACK TOÀN DIỆN) ====================
+# ==================== MODULE BÓC TÁCH MÁY CHỦ MIR4 (FALLBACK TOÀN CẦU) ====================
 def get_live_mir4_server_list():
     extracted_servers = []
     urls = [
@@ -576,12 +576,11 @@ def save_character_record(data_obj, conn=None):
         power = str(data_obj.get("power", "N/A")).strip()
         level = str(data_obj.get("level", "N/A")).strip()
 
-        # SO SÁNH VỚI LẦN CÀO TRƯỚC THEO TÊN
         c.execute("SELECT current_server, current_clan, power FROM characters WHERE LOWER(char_name) = LOWER(?)", (c_name,))
         row = c.fetchone()
 
         if not row:
-            # KIỂM TRA PHÁT HIỆN ĐỔI TÊN: Nếu lực chiến cao giống hệt một nhân vật cũ cùng server/clan nhưng tên khác
+            # Phát hiện đổi tên nếu trùng server/clan/power
             if power != "N/A" and server != "Chưa xác định":
                 c.execute("""
                     SELECT char_name FROM characters 
@@ -605,7 +604,6 @@ def save_character_record(data_obj, conn=None):
         else:
             old_server, old_clan, old_power = row
 
-            # SO SÁNH VÀ GHI LỊCH SỬ THAY ĐỔI MÁY CHỦ
             if server and server != "Chưa xác định" and server.lower() != (old_server or "").lower():
                 c.execute("SELECT server_name FROM server_history WHERE LOWER(char_name)=LOWER(?) ORDER BY id DESC LIMIT 1", (c_name,))
                 last_srv = c.fetchone()
@@ -613,7 +611,6 @@ def save_character_record(data_obj, conn=None):
                     c.execute("INSERT INTO server_history (char_name, server_name, timestamp) VALUES (?, ?, ?)",
                               (c_name, server, now_str))
 
-            # SO SÁNH VÀ GHI LỊCH SỬ THAY ĐỔI CLAN
             if clan and clan.lower() != (old_clan or "").lower():
                 c.execute("SELECT clan_name FROM clan_history WHERE LOWER(char_name)=LOWER(?) ORDER BY id DESC LIMIT 1", (c_name,))
                 last_cln = c.fetchone()
@@ -621,7 +618,6 @@ def save_character_record(data_obj, conn=None):
                     c.execute("INSERT INTO clan_history (char_name, clan_name, timestamp) VALUES (?, ?, ?)",
                               (c_name, clan, now_str))
 
-            # CẬP NHẬT SNAPSHOT MỚI NHẤT
             c.execute("""
                 UPDATE characters 
                 SET current_server=?, current_clan=?, rank=?, power=?, level=?, last_updated=? 
@@ -682,13 +678,12 @@ class Mir4FullCrawlerThread(threading.Thread):
             except Exception:
                 pass
 
-            # Chờ 12 tiếng cho chu kỳ cào tiếp theo (432 x 100s = 12h)
             for _ in range(432):
                 if not self.running:
                     break
                 time.sleep(100)
 
-# ==================== LUỒNG TRUY VẤN TÌM KIẾM THEO TÊN (LIVE FALLBACK) ====================
+# ==================== LUỒNG TRUY VẤN TÌM KIẾM THEO TÊN ====================
 class Mir4QueryWorker(QThread):
     finished = pyqtSignal(str, bool)
 
@@ -714,7 +709,6 @@ class Mir4QueryWorker(QThread):
             clean_search = self.char_name.lower()
             db_path = os.path.join(get_app_dir(), TRACKER_DB)
 
-            # BƯỚC 1: Tìm kiếm trong SQLite nội bộ
             try:
                 conn = sqlite3.connect(db_path, timeout=5.0)
                 c = conn.cursor()
@@ -739,7 +733,6 @@ class Mir4QueryWorker(QThread):
             except Exception:
                 pass
 
-            # BƯỚC 2: Quét trực tiếp trên web nếu SQLite chưa lưu (Timeout 60s)
             if not found_data:
                 server_list = get_live_mir4_server_list()
                 for srv in server_list:
@@ -773,7 +766,6 @@ class Mir4QueryWorker(QThread):
                     if found_data:
                         break
 
-            # BƯỚC 3: Quét XDRACO nếu đã seal NFT
             if not found_data and (time.time() - start_time < self.search_timeout):
                 nft_url = f"https://webapi.mir4global.com/nft/character/search?characterName={urllib.parse.quote(self.char_name)}"
                 headers = {
@@ -801,7 +793,6 @@ class Mir4QueryWorker(QThread):
                 except Exception:
                     pass
 
-            # BƯỚC 4: Lấy danh sách lịch sử THAY ĐỔI (Tối đa 5 lần)
             servers = []
             clans = []
             renames = []
@@ -809,7 +800,6 @@ class Mir4QueryWorker(QThread):
                 conn = sqlite3.connect(db_path, timeout=5.0)
                 c = conn.cursor()
                 
-                # 1. Lịch sử máy chủ
                 c.execute("SELECT server_name, timestamp FROM server_history WHERE LOWER(char_name) = ? ORDER BY id DESC", (clean_search,))
                 raw_srv = c.fetchall()
                 for s_name, t_stamp in raw_srv:
@@ -819,7 +809,6 @@ class Mir4QueryWorker(QThread):
                     if len(servers) >= MAX_HISTORY_ENTRIES:
                         break
 
-                # 2. Lịch sử Clan
                 c.execute("SELECT clan_name, timestamp FROM clan_history WHERE LOWER(char_name) = ? ORDER BY id DESC", (clean_search,))
                 raw_cln = c.fetchall()
                 for c_name, t_stamp in raw_cln:
@@ -829,7 +818,6 @@ class Mir4QueryWorker(QThread):
                     if len(clans) >= MAX_HISTORY_ENTRIES:
                         break
 
-                # 3. Lịch sử đổi tên
                 c.execute("SELECT old_name, timestamp FROM name_history WHERE LOWER(char_name) = ? ORDER BY id DESC", (clean_search,))
                 raw_renames = c.fetchall()
                 for old_n, t_stamp in raw_renames:
@@ -875,7 +863,6 @@ class Mir4QueryWorker(QThread):
             out.append(f" CẤP ĐỘ (LEVEL)     : {level}")
             out.append("======================================================================")
             
-            # --- YÊU CẦU 3: HIỂN THỊ TỐI ĐA 5 LẦN ĐỔI MÁY CHỦ ---
             out.append("\n[+] LỊCH SỬ MÁY CHỦ (SERVER HISTORY - TỐI ĐA 5 LẦN ĐỔI):")
             out.append(f"  • Máy chủ hiện tại   : {current_server}")
             past_servers = [s for s in servers if s[0].strip().lower() != current_server.strip().lower() and s[0] != "Chưa xác định"]
@@ -885,7 +872,6 @@ class Mir4QueryWorker(QThread):
             else:
                 out.append("  • Lịch sử trước đây  : Chưa ghi nhận thay đổi máy chủ")
 
-            # --- YÊU CẦU 3: HIỂN THỊ TỐI ĐA 5 LẦN ĐỔI CLAN ---
             out.append("\n[+] LỊCH SỬ CLAN (CLAN HISTORY - TỐI ĐA 5 LẦN ĐỔI):")
             out.append(f"  • Clan hiện tại      : {current_clan}")
             past_clans = [c for c in clans if c[0].strip().lower() != current_clan.strip().lower() and c[0] != "Không có Clan"]
@@ -895,7 +881,6 @@ class Mir4QueryWorker(QThread):
             else:
                 out.append("  • Lịch sử trước đây  : Chưa ghi nhận thay đổi Clan")
 
-            # --- YÊU CẦU 4: DÒNG LỊCH SỬ ĐỔI TÊN BÊN DƯỚI CLAN & SERVER ---
             out.append("\n[+] LỊCH SỬ ĐỔI TÊN (NAME HISTORY):")
             if renames:
                 for idx, (old_n, t_stamp) in enumerate(renames[:5], 1):
@@ -966,12 +951,12 @@ class MasterAppWindow(QMainWindow):
             padding: 8px;
         """)
         ad_layout = QVBoxLayout(ad_banner)
-        ad_title = QLabel("★ HỆ THỐNG TRUY XUẤT THÔNG TIN TÀI KHOẢN THEO TÊN (PHAMHUNG) ★")
+        ad_title = QLabel("★ HỆ THỐNG QUẢN LÝ vs ĐỒNG BỘ PC by (PHAMHUNG) ★")
         ad_title.setFont(QFont("Segoe UI", 12, QFont.Bold))
         ad_title.setStyleSheet("color: #000000;")
         ad_title.setAlignment(Qt.AlignCenter)
         
-        ad_sub = QLabel("Hỗ trợ đồng bộ đa máy con qua LAN/Internet | Liên hệ : ZL 0392771558")
+        ad_sub = QLabel("CHỨC NĂNG CHÍNH : Tự khởi động BOT , Tự Update game ( ALL PC) ")
         ad_sub.setFont(QFont("Segoe UI", 9, QFont.DemiBold))
         ad_sub.setStyleSheet("color: #111111;")
         ad_sub.setAlignment(Qt.AlignCenter)
@@ -1187,7 +1172,7 @@ class MasterAppWindow(QMainWindow):
             QMenu::item:selected { background-color: #c62828; color: #ffffff; }
         """)
 
-        action_update = QAction(f"🚀 UPDATE MIR4 (15 PHÚT)", self)
+        action_update = QAction(f"🚀 UPDATE MIR4 (15 PHÚT) CHO {len(selected_rows)} MÁY", self)
         action_update.triggered.connect(lambda: self.execute_on_selected("UPDATE_MIR4"))
         menu.addAction(action_update)
 
@@ -1319,7 +1304,7 @@ class MasterAppWindow(QMainWindow):
         else:
             QMessageBox.warning(self, "Lỗi", "Không thể cập nhật cấu hình khởi động!")
 
-# ==================== CỬA SỔ NHẬP KEY BẢN QUYỀN (YÊU CẦU 1 & 2) ====================
+# ==================== CỬA SỔ NHẬP KEY BẢN QUYỀN ====================
 class KeyActivationWindow(QWidget):
     def __init__(self, on_success_callback):
         super().__init__()
@@ -1486,7 +1471,6 @@ if __name__ == "__main__":
     init_tracker_db()
     app = QApplication(sys.argv)
 
-    # 1. Kiểm tra bản quyền trước
     if is_app_activated():
         start_main_login()
     else:
