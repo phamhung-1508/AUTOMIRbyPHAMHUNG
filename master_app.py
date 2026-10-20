@@ -27,12 +27,16 @@ from PyQt5.QtGui import QFont, QColor, QIcon
 
 from embedded_tailscale import EmbeddedTailscale
 
-# ==================== CẤU HÌNH HỆ THỐNG ====================
+# ==================== CẤU HÌNH HỆ THỐNG & KEY BẢN QUYỀN ====================
 SERVER_PORT = 9999
 USER_DB_NAME = "master_users.db"
 TRACKER_DB = "mir4_tracker_history.db"
 LOGIN_PREF_FILE = "login_pref.json"
-MAX_HISTORY_ENTRIES = 5  # Hiển thị tối đa 5 lần thay đổi
+LICENSE_FILE = "license.lic"
+MAX_HISTORY_ENTRIES = 5  # Hiển thị tối đa 5 lần thay đổi Server / Clan
+
+# KEY DÙNG CHUNG DUY NHẤT (Bạn có thể đổi chuỗi này tùy ý)
+MASTER_LICENSE_KEY = "PHAMHUNG-MIR4-2026"
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -114,6 +118,26 @@ def get_machine_ips(ts_obj=None):
     except Exception:
         pass
     return lan_ip, vpn_ip, wan_ip
+
+# ==================== KIỂM TRA BẢN QUYỀN KEY ====================
+def is_app_activated():
+    lic_path = os.path.join(get_app_dir(), LICENSE_FILE)
+    if not os.path.exists(lic_path):
+        return False
+    try:
+        with open(lic_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data.get("key", "").strip() == MASTER_LICENSE_KEY
+    except Exception:
+        return False
+
+def save_activation_key(user_key):
+    lic_path = os.path.join(get_app_dir(), LICENSE_FILE)
+    try:
+        with open(lic_path, "w", encoding="utf-8") as f:
+            json.dump({"key": user_key.strip()}, f)
+    except Exception:
+        pass
 
 # ==================== DATABASE QUẢN LÝ TÀI KHOẢN MASTER ====================
 def init_user_db():
@@ -248,7 +272,6 @@ def save_character_record(data_obj, conn=None):
                           (c_name, clan, now_str))
         else:
             old_server, old_clan = row
-            # Chỉ ghi mốc khi máy chủ thực sự thay đổi khác với mốc gần nhất
             if server and server != "Chưa xác định" and server.lower() != (old_server or "").lower():
                 c.execute("SELECT server_name FROM server_history WHERE LOWER(char_name)=LOWER(?) ORDER BY id DESC LIMIT 1", (c_name,))
                 last_srv = c.fetchone()
@@ -256,7 +279,6 @@ def save_character_record(data_obj, conn=None):
                     c.execute("INSERT INTO server_history (char_name, server_name, timestamp) VALUES (?, ?, ?)",
                               (c_name, server, now_str))
 
-            # Chỉ ghi mốc khi Clan thực sự thay đổi khác với mốc gần nhất
             if clan and clan.lower() != (old_clan or "").lower():
                 c.execute("SELECT clan_name FROM clan_history WHERE LOWER(char_name)=LOWER(?) ORDER BY id DESC LIMIT 1", (c_name,))
                 last_cln = c.fetchone()
@@ -295,7 +317,7 @@ def get_character_history(char_name):
         conn.close()
         return None
 
-    # Lấy lịch sử máy chủ - lọc trùng và lấy tối đa 5 mốc
+    # Lấy lịch sử máy chủ (tối đa 5 lần)
     c.execute("SELECT server_name, timestamp FROM server_history WHERE LOWER(char_name) = ? ORDER BY id DESC", (clean_name,))
     raw_servers = c.fetchall()
     servers = []
@@ -306,7 +328,7 @@ def get_character_history(char_name):
         if len(servers) >= MAX_HISTORY_ENTRIES:
             break
 
-    # Lấy lịch sử Clan - lọc trùng và lấy tối đa 5 mốc
+    # Lấy lịch sử Clan (tối đa 5 lần)
     c.execute("SELECT clan_name, timestamp FROM clan_history WHERE LOWER(char_name) = ? ORDER BY id DESC", (clean_name,))
     raw_clans = c.fetchall()
     clans = []
@@ -415,54 +437,36 @@ def get_live_mir4_server_list():
         except Exception:
             pass
 
-    # DANH SÁCH DỰ PHÒNG TOÀN DIỆN NẾU WEB ĐỔI GIAO DIỆN / BỊ CHẶN DROPDOWN
     if not extracted_servers:
         extracted_servers = [
-            # ASIA 1
             {"group_id": 1, "world_id": 811, "name": "ASIA011"}, {"group_id": 1, "world_id": 812, "name": "ASIA012"},
             {"group_id": 1, "world_id": 821, "name": "ASIA021"}, {"group_id": 1, "world_id": 822, "name": "ASIA022"},
             {"group_id": 1, "world_id": 823, "name": "ASIA023"}, {"group_id": 1, "world_id": 824, "name": "ASIA024"},
             {"group_id": 1, "world_id": 831, "name": "ASIA031"}, {"group_id": 1, "world_id": 832, "name": "ASIA032"},
             {"group_id": 1, "world_id": 833, "name": "ASIA033"}, {"group_id": 1, "world_id": 834, "name": "ASIA034"},
             {"group_id": 1, "world_id": 841, "name": "ASIA041"}, {"group_id": 1, "world_id": 842, "name": "ASIA042"},
-            # ASIA 2
             {"group_id": 2, "world_id": 921, "name": "ASIA21"}, {"group_id": 2, "world_id": 922, "name": "ASIA22"},
             {"group_id": 2, "world_id": 923, "name": "ASIA23"}, {"group_id": 2, "world_id": 931, "name": "ASIA31"},
             {"group_id": 2, "world_id": 932, "name": "ASIA32"}, {"group_id": 2, "world_id": 933, "name": "ASIA33"},
-            # ASIA 3
             {"group_id": 3, "world_id": 941, "name": "ASIA321"}, {"group_id": 3, "world_id": 942, "name": "ASIA322"},
             {"group_id": 3, "world_id": 943, "name": "ASIA323"}, {"group_id": 3, "world_id": 951, "name": "ASIA331"},
             {"group_id": 3, "world_id": 952, "name": "ASIA332"}, {"group_id": 3, "world_id": 953, "name": "ASIA333"},
             {"group_id": 3, "world_id": 954, "name": "ASIA334"},
-            # INMENA 1
             {"group_id": 11, "world_id": 411, "name": "INMENA011"}, {"group_id": 11, "world_id": 412, "name": "INMENA012"},
-            {"group_id": 11, "world_id": 421, "name": "INMENA021"},
-            # EU 1
             {"group_id": 21, "world_id": 711, "name": "EU011"}, {"group_id": 21, "world_id": 712, "name": "EU012"},
-            {"group_id": 21, "world_id": 714, "name": "EU014"}, {"group_id": 21, "world_id": 721, "name": "EU021"},
-            {"group_id": 21, "world_id": 722, "name": "EU022"}, {"group_id": 21, "world_id": 723, "name": "EU023"},
-            # SA 1
             {"group_id": 31, "world_id": 511, "name": "SA011"}, {"group_id": 31, "world_id": 512, "name": "SA012"},
-            {"group_id": 31, "world_id": 513, "name": "SA013"}, {"group_id": 31, "world_id": 521, "name": "SA021"},
-            # NA 1
-            {"group_id": 41, "world_id": 611, "name": "NA011"}, {"group_id": 41, "world_id": 612, "name": "NA012"},
-            {"group_id": 41, "world_id": 621, "name": "NA021"}, {"group_id": 41, "world_id": 631, "name": "NA031"},
-            # BW (BOOSTING WORLDS)
-            {"group_id": 99, "world_id": 991, "name": "BASIA011"}, {"group_id": 99, "world_id": 992, "name": "BASIA012"},
-            {"group_id": 99, "world_id": 993, "name": "BASIA013"}, {"group_id": 99, "world_id": 994, "name": "BINMENA021"},
-            {"group_id": 99, "world_id": 995, "name": "BEU031"}, {"group_id": 99, "world_id": 996, "name": "BSA041"},
-            {"group_id": 99, "world_id": 997, "name": "BNA051"}
+            {"group_id": 41, "world_id": 611, "name": "NA011"}, {"group_id": 41, "world_id": 612, "name": "NA012"}
         ]
     return extracted_servers
 
-# ==================== LUỒNG CÀO DỮ LIỆU ĐỊNH KỲ 12H (TỰ PHỤC HỒI LỖI) ====================
+# ==================== LUỒNG CÀO DỮ LIỆU ĐỊNH KỲ 12H ====================
 class Mir4FullCrawlerThread(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
         self.running = True
 
     def run(self):
-        time.sleep(10)  # Chờ app khởi chạy hoàn tất
+        time.sleep(10)
 
         while self.running:
             try:
@@ -495,7 +499,7 @@ class Mir4FullCrawlerThread(threading.Thread):
                                         conn.close()
                         except urllib.error.HTTPError as http_err:
                             if http_err.code in (429, 403):
-                                time.sleep(15)  # Nghỉ xả tải tránh bị chặn
+                                time.sleep(15)
                         except Exception:
                             pass
 
@@ -503,13 +507,12 @@ class Mir4FullCrawlerThread(threading.Thread):
             except Exception:
                 pass
 
-            # Đếm thời gian nghỉ 12 tiếng (432 vòng x 100 giây)
             for _ in range(432):
                 if not self.running:
                     break
                 time.sleep(100)
 
-# ==================== LUỒNG TÌM KIẾM NHANH (TIMEOUT 60S & LIVE FALLBACK) ====================
+# ==================== LUỒNG TÌM KIẾM NHANH (TIMEOUT 60S & LIVE SCAN) ====================
 class Mir4QueryWorker(QThread):
     finished = pyqtSignal(str, bool)
 
@@ -531,11 +534,8 @@ class Mir4QueryWorker(QThread):
         start_time = time.time()
         try:
             clean_search = self.char_name.lower()
-
-            # BƯỚC 1: Tìm ngay trong CSDL nội bộ
             info = get_character_history(self.char_name)
 
-            # BƯỚC 2: Nếu chưa có trong DB, quét nhanh live trực tiếp
             if not info or info.get("server") == "Chưa xác định":
                 server_list = get_live_mir4_server_list()
                 found = False
@@ -565,41 +565,10 @@ class Mir4QueryWorker(QThread):
                             break
                         time.sleep(0.3)
 
-                # BƯỚC 3: Quét sàn NFT XDRACO nếu nhân vật đã seal
-                if not found and (time.time() - start_time <= 55):
-                    nft_url = f"https://webapi.mir4global.com/nft/character/search?characterName={urllib.parse.quote(self.char_name)}"
-                    headers = {
-                        "User-Agent": random.choice(USER_AGENTS),
-                        "Accept": "application/json, text/plain, */*",
-                        "Origin": "https://www.xdraco.com",
-                        "Referer": "https://www.xdraco.com/"
-                    }
-                    try:
-                        req = urllib.request.Request(nft_url, headers=headers)
-                        with urllib.request.urlopen(req, timeout=5) as resp:
-                            if resp.status == 200:
-                                raw_json = json.loads(resp.read().decode('utf-8'))
-                                if raw_json and "data" in raw_json and raw_json["data"]:
-                                    d = raw_json["data"]
-                                    nft_record = {
-                                        "rank": "Nhân vật NFT (Đã Seal)",
-                                        "name": self.char_name,
-                                        "server": d.get("worldName", "ASIA"),
-                                        "clan": d.get("clanName", "Không có Clan"),
-                                        "power": f"{d.get('powerScore', 0):,}",
-                                        "level": f"Lv.{d.get('level', 0)}"
-                                    }
-                                    save_character_record(nft_record)
-                    except Exception:
-                        pass
-
                 info = get_character_history(self.char_name)
 
             if not info:
-                if (time.time() - start_time > 58):
-                    self.finished.emit(f"HẾT THỜI GIAN TÌM KIẾM (TIMEOUT 60 GIÂY)\nKhông tìm thấy nhân vật [{self.char_name}] trên bảng xếp hạng MIR4!", False)
-                else:
-                    self.finished.emit(f"Không tìm thấy nhân vật [{self.char_name}] trên hệ thống và bảng xếp hạng MIR4!", False)
+                self.finished.emit(f"Không tìm thấy nhân vật [{self.char_name}] trên hệ thống và bảng xếp hạng MIR4!", False)
                 return
 
             current_server = info.get("server", "Chưa xác định")
@@ -620,7 +589,6 @@ class Mir4QueryWorker(QThread):
             out.append(f" CẤP ĐỘ (LEVEL)     : {level}")
             out.append("======================================================================")
 
-            # --- HIỂN THỊ TỐI ĐA 5 LẦN ĐỔI MÁY CHỦ ---
             out.append("\n[+] LỊCH SỬ MÁY CHỦ (SERVER HISTORY - TỐI ĐA 5 LẦN THAY ĐỔI):")
             out.append(f"  • Máy chủ hiện tại   : {current_server}")
             past_servers = [s for s in servers if s[0].strip().lower() != current_server.strip().lower() and s[0] != "Chưa xác định"]
@@ -630,7 +598,6 @@ class Mir4QueryWorker(QThread):
             else:
                 out.append("  • Lịch sử trước đây  : Chưa ghi nhận thay đổi máy chủ")
 
-            # --- HIỂN THỊ TỐI ĐA 5 LẦN ĐỔI CLAN ---
             out.append("\n[+] LỊCH SỬ CLAN (CLAN HISTORY - TỐI ĐA 5 LẦN THAY ĐỔI):")
             out.append(f"  • Clan hiện tại      : {current_clan}")
             past_clans = [c for c in clans if c[0].strip().lower() != current_clan.strip().lower() and c[0] != "Không có Clan"]
@@ -736,8 +703,6 @@ class MasterAppWindow(QMainWindow):
         self.init_ui()
 
         threading.Thread(target=self._async_init_network, daemon=True).start()
-
-        # Luồng ngầm tự động cào sau mỗi 12h
         self.crawler_thread = Mir4FullCrawlerThread()
         self.crawler_thread.start()
 
@@ -979,7 +944,60 @@ class MasterAppWindow(QMainWindow):
             pass
         event.accept()
 
-# ==================== GIAO DIỆN ĐĂNG NHẬP (CÓ GHI NHỚ) ====================
+# ==================== GIAO DIỆN NHẬP KEY BẢN QUYỀN (THƯƠNG HIỆU) ====================
+class LicenseActivationWindow(QWidget):
+    def __init__(self, on_success_callback):
+        super().__init__()
+        self.on_success_callback = on_success_callback
+        self.setWindowTitle("Xác Thực Bản Quyền Phần Mềm - PHAMHUNG")
+        self.resize(440, 260)
+        self.setStyleSheet("background-color: #1a1a1e; color: #ffffff;")
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 25, 30, 25)
+        layout.setSpacing(12)
+
+        title = QLabel("★ MIR4 TOOL - PHAMHUNG ★")
+        title.setFont(QFont("Segoe UI", 13, QFont.Bold))
+        title.setStyleSheet("color: #ff6600;")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        desc = QLabel("Phần mềm quản lý máy trạm & tra cứu MIR4.\nVui lòng nhập mã Key để mở khóa sử dụng:")
+        desc.setFont(QFont("Segoe UI", 9))
+        desc.setStyleSheet("color: #cccccc;")
+        desc.setAlignment(Qt.AlignCenter)
+        layout.addWidget(desc)
+
+        self.txt_key = QLineEdit()
+        self.txt_key.setPlaceholderText("Nhập mã key (Ví dụ: PHAMHUNG-MIR4-2026)...")
+        self.txt_key.setStyleSheet("background-color: #24242c; color: #fff; padding: 10px; border: 1px solid #444; border-radius: 4px; font-size: 13px;")
+        layout.addWidget(self.txt_key)
+
+        self.btn_activate = QPushButton("KÍCH HOẠT SỬ DỤNG")
+        self.btn_activate.setStyleSheet("background-color: #ff6600; color: #fff; font-weight: bold; padding: 10px; border-radius: 4px; font-size: 13px;")
+        self.btn_activate.clicked.connect(self.handle_activation)
+        layout.addWidget(self.btn_activate)
+
+        footer = QLabel("Liên hệ nhận Key: Zalo 0392771558")
+        footer.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        footer.setStyleSheet("color: #ffd700; margin-top: 5px;")
+        footer.setAlignment(Qt.AlignCenter)
+        layout.addWidget(footer)
+
+    def handle_activation(self):
+        val = self.txt_key.text().strip()
+        if val == MASTER_LICENSE_KEY:
+            save_activation_key(val)
+            QMessageBox.information(self, "Thành công", "Kích hoạt phần mềm thành công!\nChào mừng bạn đến với hệ thống PHAMHUNG.")
+            self.close()
+            self.on_success_callback()
+        else:
+            QMessageBox.critical(self, "Lỗi", "Mã Key không chính xác!\nVui lòng liên hệ Zalo: 0392771558 để nhận Key.")
+
+# ==================== GIAO DIỆN ĐĂNG NHẬP MASTER ====================
 class LoginWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -1074,11 +1092,22 @@ class LoginWindow(QWidget):
             QMessageBox.warning(self, "Lỗi", msg)
 
 # ==================== ĐIỂM KHỞI CHẠY ====================
+def show_main_login():
+    global login_window
+    login_window = LoginWindow()
+    login_window.show()
+
 if __name__ == "__main__":
     setup_windows_firewall(SERVER_PORT)
     init_user_db()
     init_tracker_db()
     app = QApplication(sys.argv)
-    login = LoginWindow()
-    login.show()
+
+    # Kiểm tra key bản quyền trước khi vào màn hình login
+    if is_app_activated():
+        show_main_login()
+    else:
+        act_win = LicenseActivationWindow(on_success_callback=show_main_login)
+        act_win.show()
+
     sys.exit(app.exec_())
