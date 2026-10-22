@@ -75,6 +75,45 @@ def get_current_exe_path():
         return sys.executable
     return os.path.abspath(__file__)
 
+def setup_client_firewall():
+    """Mở tường lửa trên máy con cho VPN Tailscale và kết nối tới máy chính (kể cả mạng Public)"""
+    try:
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+
+        rules = [
+            'netsh advfirewall firewall add rule name="AUTOGAME_Node_Tailscale_UDP" dir=in action=allow protocol=UDP localport=41641 profile=any',
+            'netsh advfirewall firewall add rule name="AUTOGAME_Node_Tailscale_Subnet_IN" dir=in action=allow remoteip=100.64.0.0/10 profile=any',
+            'netsh advfirewall firewall add rule name="AUTOGAME_Node_Tailscale_Subnet_OUT" dir=out action=allow remoteip=100.64.0.0/10 profile=any',
+            'netsh advfirewall firewall add rule name="AUTOGAME_Node_ICMP_Ping" dir=in action=allow protocol=icmpv4:8,any profile=any',
+            'netsh advfirewall firewall add rule name="AUTOGAME_Node_Master_TCP_OUT" dir=out action=allow protocol=TCP remoteport=9999 profile=any'
+        ]
+
+        ts_prog_dir = os.path.join(os.environ.get("PROGRAMDATA", "C:\\ProgramData"), "Mir4Tailscale")
+        for bin_name in ("tailscaled.exe", "tailscale.exe"):
+            bin_path = os.path.join(ts_prog_dir, bin_name)
+            if os.path.exists(bin_path):
+                rules.append(f'netsh advfirewall firewall add rule name="AUTOGAME_Node_{bin_name}_IN" dir=in action=allow program="{bin_path}" profile=any')
+                rules.append(f'netsh advfirewall firewall add rule name="AUTOGAME_Node_{bin_name}_OUT" dir=out action=allow program="{bin_path}" profile=any')
+
+        chk_cmd = 'netsh advfirewall firewall show rule name="AUTOGAME_Node_Tailscale_Subnet_IN"'
+        res = subprocess.run(chk_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
+        if res.returncode != 0:
+            for cmd in rules:
+                subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
+    except Exception:
+        pass
+
+def enable_socket_keepalive(sock):
+    """Bật TCP Keep-Alive giúp phát hiện đứt kết nối VPN ngay lập tức"""
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "SIO_KEEPALIVE_VALS"):
+            sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 10000, 3000))
+    except Exception:
+        pass
+
 def get_uptime_str():
     try:
         millis = ctypes.windll.kernel32.GetTickCount64()
@@ -182,7 +221,10 @@ def kill_tailscale_processes():
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = subprocess.SW_HIDE
-        subprocess.run("taskkill /F /IM tailscaled.exe /IM tailscale.exe", shell=True, startupinfo=startupinfo)
+        subprocess.run(
+            "taskkill /F /IM tailscaled.exe /IM tailscale.exe",
+            shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo
+        )
     except Exception:
         pass
 
@@ -223,8 +265,25 @@ class ClientNetworkThread(threading.Thread):
         self.main_app = main_app
         self.signals = signals
         self.running = True
+        self.fail_count = 0
+
+    def ensure_vpn_ready(self):
+        """Đảm bảo tiến trình VPN Tailscale trên máy con luôn chạy và có IP 100.x.y.z"""
+        try:
+            setup_client_firewall()
+            if self.main_app.ts:
+                my_vpn_ip = self.main_app.ts.get_my_ip()
+                if not my_vpn_ip:
+                    self.signals.connection_status_changed.emit("🔄 Đang đồng bộ lại mạng ảo VPN Tailscale...", "#ffb300")
+                    self.main_app.ts.start_and_connect()
+                    setup_client_firewall()
+        except Exception:
+            pass
 
     def run(self):
+        # Khởi tạo Firewall và VPN ngay trong luồng mạng
+        self.ensure_vpn_ready()
+
         while self.running:
             cfg = self.main_app.config
             is_active = cfg.get("is_connected", False)
@@ -238,21 +297,28 @@ class ClientNetworkThread(threading.Thread):
                 time.sleep(2)
                 continue
 
+            # Nếu kết nối tới IP VPN 100.x.y.z bị lỗi liên tiếp 3 lần, tự động kiểm tra và kích hoạt lại Tailscale
+            if self.fail_count >= 3 and master_host.startswith("100."):
+                self.ensure_vpn_ready()
+                self.fail_count = 0
+
             sock = None
             try:
                 self.signals.connection_status_changed.emit(f"Đang kết nối tới {master_host}:{master_port}...", "#00e5ff")
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5.0)
+                enable_socket_keepalive(sock)
+                sock.settimeout(6.0)
                 sock.connect((master_host, master_port))
                 sock.settimeout(None)
 
+                self.fail_count = 0
                 self.signals.connection_status_changed.emit(f"🟢 ĐÃ LIÊN KẾT: {master_user}", "#00e676")
 
                 def receive_worker(s):
                     buf = ""
                     while self.running:
                         try:
-                            data = s.recv(1024).decode('utf-8')
+                            data = s.recv(1024).decode('utf-8', errors='ignore')
                             if not data:
                                 break
                             buf += data
@@ -260,6 +326,11 @@ class ClientNetworkThread(threading.Thread):
                                 line, buf = buf.split("\n", 1)
                                 if line.strip():
                                     cmd_obj = json.loads(line)
+                                    if cmd_obj.get("status") == "REJECTED":
+                                        self.signals.connection_status_changed.emit(
+                                            f"🔴 TỪ CHỐI: Sai tài khoản quản trị ({master_user})", "#ff5252"
+                                        )
+                                        return
                                     cmd = cmd_obj.get("command", "")
                                     if cmd:
                                         self.signals.remote_command_received.emit(cmd)
@@ -271,6 +342,12 @@ class ClientNetworkThread(threading.Thread):
 
                 while self.running and rcv_thread.is_alive():
                     if not self.main_app.config.get("is_connected", False):
+                        break
+                    if (
+                        self.main_app.config.get("master_host", "").strip() != master_host
+                        or self.main_app.config.get("master_user", "").strip().lower() != master_user
+                        or self.main_app.config.get("node_name", "").strip() != node_name
+                    ):
                         break
                     
                     if self.main_app.is_updating_mir4:
@@ -294,14 +371,15 @@ class ClientNetworkThread(threading.Thread):
                     time.sleep(3)
 
             except Exception:
-                self.signals.connection_status_changed.emit(f"🔴 MẤT KẾT NỐI TỚI {master_host} (Thử lại sau 5s)", "#ff5252")
+                self.fail_count += 1
+                self.signals.connection_status_changed.emit(f"🔴 MẤT KẾT NỐI TỚI {master_host} (Thử lại sau 4s)", "#ff5252")
             finally:
                 if sock:
                     try:
                         sock.close()
                     except Exception:
                         pass
-                time.sleep(5)
+                time.sleep(4)
 
 def capture_window_pixmap(hwnd, target_w, target_h):
     try:
@@ -441,7 +519,6 @@ class MasterApp(QMainWindow):
         self.is_updating_mir4 = False
 
         self.ts = EmbeddedTailscale()
-        threading.Thread(target=self.ts.start_and_connect, daemon=True).start()
 
         self.current_cols = 4
         self.cards = {}
@@ -480,6 +557,7 @@ class MasterApp(QMainWindow):
 
     def closeEvent(self, event):
         """Tự động chạy CMD Taskkill quyền Admin khi đóng App"""
+        self.net_thread.running = False
         kill_tailscale_processes()
         event.accept()
 
@@ -861,7 +939,6 @@ class MasterApp(QMainWindow):
             pyautogui.click(pos.x, pos.y)
 
     def find_and_click_image(self, image_path, confidence=0.75, timeout=45, double_click=False):
-        name = os.path.basename(image_path)
         start_time = time.time()
         while time.time() - start_time < timeout:
             if not self.is_updating_mir4:
