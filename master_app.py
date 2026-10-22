@@ -1250,12 +1250,12 @@ class MasterAppWindow(QMainWindow):
             padding: 8px;
         """)
         ad_layout = QVBoxLayout(ad_banner)
-        ad_title = QLabel("★ HỆ THỐNG TRUY XUẤT THÔNG TIN TÀI KHOẢN THEO TÊN (PHAMHUNG) ★")
+        ad_title = QLabel("★ HỆ THỐNG ĐƯỢC THIẾT KẾ DÀNH CHO NGƯỜI DÙNG TINKER (PHAMHUNG) ★")
         ad_title.setFont(QFont("Segoe UI", 12, QFont.Bold))
         ad_title.setStyleSheet("color: #000000;")
         ad_title.setAlignment(Qt.AlignCenter)
         
-        ad_sub = QLabel("Hỗ trợ đồng bộ đa máy con qua LAN/Internet | Liên hệ : ZL 0392771558")
+        ad_sub = QLabel("QUẢN LÝ MÁY CON- AUTO MỞ QT + TOOL + UPDATE GAME ")
         ad_sub.setFont(QFont("Segoe UI", 9, QFont.DemiBold))
         ad_sub.setStyleSheet("color: #111111;")
         ad_sub.setAlignment(Qt.AlignCenter)
