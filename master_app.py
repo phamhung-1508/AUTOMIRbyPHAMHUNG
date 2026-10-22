@@ -49,14 +49,17 @@ def kill_tailscale_processes():
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = subprocess.SW_HIDE
-        subprocess.run("taskkill /F /IM tailscaled.exe /IM tailscale.exe", shell=True, startupinfo=startupinfo)
+        subprocess.run(
+            "taskkill /F /IM tailscaled.exe /IM tailscale.exe",
+            shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo
+        )
     except Exception:
         pass
 
 def setup_windows_firewall(port=9999):
     """
-    Mở toàn bộ cổng kết nối TCP/UDP, cổng VPN Tailscale (41641, 3478), ICMP Ping
-    và cấp quyền xuyên tường lửa trên mọi loại mạng (Domain, Private, Public).
+    Chạy ngầm mở toàn bộ cổng TCP/UDP 9999, cổng Tailscale VPN (41641, 3478),
+    ICMP Ping và cho phép tiến trình tailscaled.exe trên mọi loại mạng (Public, Private, Domain).
     """
     try:
         startupinfo = subprocess.STARTUPINFO()
@@ -64,54 +67,31 @@ def setup_windows_firewall(port=9999):
         startupinfo.wShowWindow = subprocess.SW_HIDE
 
         rules = [
-            f'netsh advfirewall firewall add rule name="AUTOGAME_Master_Socket_Server_TCP_IN" dir=in action=allow protocol=TCP localport={port} profile=any enable=yes',
-            f'netsh advfirewall firewall add rule name="AUTOGAME_Master_Socket_Server_TCP_OUT" dir=out action=allow protocol=TCP localport={port} profile=any enable=yes',
-            f'netsh advfirewall firewall add rule name="AUTOGAME_Master_Socket_Server_UDP_IN" dir=in action=allow protocol=UDP localport={port} profile=any enable=yes',
-            f'netsh advfirewall firewall add rule name="AUTOGAME_Master_Socket_Server_UDP_OUT" dir=out action=allow protocol=UDP localport={port} profile=any enable=yes',
-            f'netsh advfirewall firewall add rule name="Mir4_Master_Socket_Server" dir=in action=allow protocol=TCP localport={port} profile=any enable=yes',
-            f'netsh advfirewall firewall add rule name="AUTOGAME_Tailscale_WireGuard_IN" dir=in action=allow protocol=UDP localport=41641 profile=any enable=yes',
-            f'netsh advfirewall firewall add rule name="AUTOGAME_Tailscale_WireGuard_OUT" dir=out action=allow protocol=UDP localport=41641 profile=any enable=yes',
-            f'netsh advfirewall firewall add rule name="AUTOGAME_Tailscale_DERP_STUN" dir=in action=allow protocol=UDP localport=3478 profile=any enable=yes',
-            f'netsh advfirewall firewall add rule name="AUTOGAME_Tailscale_Subnet_IN" dir=in action=allow remoteip=100.64.0.0/10 profile=any enable=yes',
-            f'netsh advfirewall firewall add rule name="AUTOGAME_Tailscale_Subnet_OUT" dir=out action=allow remoteip=100.64.0.0/10 profile=any enable=yes',
-            f'netsh advfirewall firewall add rule name="AUTOGAME_ICMP_Ping_IN" dir=in action=allow protocol=icmpv4:8,any profile=any enable=yes'
+            f'netsh advfirewall firewall add rule name="AUTOGAME_Master_Socket_Server" dir=in action=allow protocol=TCP localport={port} profile=any',
+            f'netsh advfirewall firewall add rule name="AUTOGAME_Master_Socket_Server_OUT" dir=out action=allow protocol=TCP localport={port} profile=any',
+            f'netsh advfirewall firewall add rule name="Mir4_Master_Socket_Server" dir=in action=allow protocol=TCP localport={port} profile=any',
+            f'netsh advfirewall firewall add rule name="AUTOGAME_Tailscale_UDP" dir=in action=allow protocol=UDP localport=41641 profile=any',
+            f'netsh advfirewall firewall add rule name="AUTOGAME_Tailscale_Subnet" dir=in action=allow remoteip=100.64.0.0/10 profile=any',
+            f'netsh advfirewall firewall add rule name="AUTOGAME_ICMP_Ping" dir=in action=allow protocol=icmpv4:8,any profile=any'
         ]
 
-        exe_curr = os.path.abspath(sys.executable)
-        rules.append(f'netsh advfirewall firewall add rule name="AUTOGAME_Master_App_Bin" dir=in action=allow program="{exe_curr}" profile=any enable=yes')
-        rules.append(f'netsh advfirewall firewall add rule name="AUTOGAME_Master_App_Bin_OUT" dir=out action=allow program="{exe_curr}" profile=any enable=yes')
+        ts_prog_dir = os.path.join(os.environ.get("PROGRAMDATA", "C:\\ProgramData"), "Mir4Tailscale")
+        for bin_name in ("tailscaled.exe", "tailscale.exe"):
+            bin_path = os.path.join(ts_prog_dir, bin_name)
+            if os.path.exists(bin_path):
+                rules.append(f'netsh advfirewall firewall add rule name="AUTOGAME_VPN_{bin_name}" dir=in action=allow program="{bin_path}" profile=any')
 
-        candidate_dirs = [
-            os.path.join(get_app_dir(), "tailscale_bin"),
-            os.path.join(getattr(sys, '_MEIPASS', get_app_dir()), "tailscale_bin"),
-            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Temp")
-        ]
-        for d in candidate_dirs:
-            for bin_name in ("tailscaled.exe", "tailscale.exe"):
-                bin_path = os.path.join(d, bin_name)
-                if os.path.exists(bin_path):
-                    rules.append(f'netsh advfirewall firewall add rule name="AUTOGAME_VPN_{bin_name}_IN" dir=in action=allow program="{bin_path}" profile=any enable=yes')
-                    rules.append(f'netsh advfirewall firewall add rule name="AUTOGAME_VPN_{bin_name}_OUT" dir=out action=allow program="{bin_path}" profile=any enable=yes')
-
-        chk_cmd = 'netsh advfirewall firewall show rule name="AUTOGAME_Tailscale_Subnet_IN"'
+        chk_cmd = 'netsh advfirewall firewall show rule name="AUTOGAME_Tailscale_Subnet"'
         res = subprocess.run(chk_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
         if res.returncode != 0:
             for cmd in rules:
                 subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
         else:
-            # Đảm bảo cổng chính luôn mở trên mọi profile mạng (kể cả Public)
             subprocess.run(rules[0], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
-            subprocess.run(rules[5], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
-            subprocess.run(rules[8], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
-
-        # Chuyển card mạng Tailscale sang chế độ Private để Windows không chặn khi dùng mạng Public
-        ps_cmd = 'powershell -NoProfile -WindowStyle Hidden -Command "Get-NetConnectionProfile | Where-Object {$_.InterfaceAlias -like \'*Tailscale*\'} | Set-NetConnectionProfile -NetworkCategory Private"'
-        subprocess.run(ps_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
     except Exception:
         pass
 
 def enable_socket_keepalive(sock):
-    """Giữ kết nối TCP xuyên NAT/VPN/Public Network không bị ngắt khi rảnh."""
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         if hasattr(socket, "SIO_KEEPALIVE_VALS"):
@@ -131,7 +111,10 @@ def get_machine_ips(ts_client=None):
 
     vpn_ip = ""
     if ts_client:
-        vpn_ip = ts_client.get_my_ip()
+        try:
+            vpn_ip = ts_client.get_my_ip()
+        except Exception:
+            pass
 
     wan_ip = ""
     try:
@@ -147,7 +130,7 @@ from PyQt5.QtWidgets import (
     QHeaderView, QMessageBox, QFrame, QCheckBox, QAbstractItemView,
     QMenu, QAction, QTabWidget, QTextEdit, QCompleter
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QObject, QThread, QStringListModel, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QObject, QThread, QStringListModel
 from PyQt5.QtGui import QFont, QColor, QIcon
 
 SERVER_PORT = 9999
@@ -156,6 +139,10 @@ APP_NAME = "AUTOGAME_MasterManager"
 TASK_NAME = "AUTOGAME_MasterManager_AutoStart"
 PREF_FILE = "login_pref.json"
 TRACKER_DB = "mir4_tracker_history.db"
+
+# Bộ nhớ đệm (RAM Cache) chứa danh sách tên gợi ý để không bao giờ gây đơ UI
+CACHED_CHAR_NAMES = []
+CACHE_LOCK = threading.Lock()
 
 def init_db():
     db_path = os.path.join(get_app_dir(), DB_NAME)
@@ -176,6 +163,7 @@ def init_tracker_db():
     c = conn.cursor()
     c.execute("PRAGMA journal_mode=WAL;")
     c.execute("PRAGMA synchronous=NORMAL;")
+    c.execute("PRAGMA busy_timeout=30000;")
     c.execute('''CREATE TABLE IF NOT EXISTS characters (
                     char_name TEXT PRIMARY KEY,
                     current_server TEXT,
@@ -184,10 +172,10 @@ def init_tracker_db():
                     power TEXT,
                     level TEXT,
                     last_updated TEXT,
-                    char_class TEXT DEFAULT 'Chưa xác định'
+                    char_class TEXT DEFAULT 'Theo bảng xếp hạng'
                 )''')
     try:
-        c.execute("ALTER TABLE characters ADD COLUMN char_class TEXT DEFAULT 'Chưa xác định'")
+        c.execute("ALTER TABLE characters ADD COLUMN char_class TEXT DEFAULT 'Theo bảng xếp hạng'")
     except Exception:
         pass
 
@@ -211,7 +199,6 @@ def init_tracker_db():
                     timestamp TEXT
                 )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_char_name ON characters(char_name);")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_char_srv_lookup ON characters(current_server, current_clan, power);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_char_clan_hist ON clan_history(char_name);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_char_srv_hist ON server_history(char_name);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_char_name_hist ON name_history(char_name);")
@@ -219,12 +206,12 @@ def init_tracker_db():
     conn.close()
 
 def prune_old_tracker_records(conn=None):
-    """Lưu trữ dữ liệu trong 180 ngày, tự động xóa dữ liệu cũ hơn 180 ngày."""
+    """Lưu trữ dữ liệu 180 ngày."""
     should_close = False
     try:
         if conn is None:
             db_path = os.path.join(get_app_dir(), TRACKER_DB)
-            conn = sqlite3.connect(db_path, timeout=15.0)
+            conn = sqlite3.connect(db_path, timeout=20.0)
             should_close = True
 
         c = conn.cursor()
@@ -239,26 +226,20 @@ def prune_old_tracker_records(conn=None):
         if should_close and conn:
             conn.close()
 
-def get_searched_char_names():
-    """Lấy toàn bộ tên nhân vật đã được cào trong CSDL để hiển thị gợi ý khi gõ."""
+def load_char_names_from_db():
+    """Đọc danh sách tên nhân vật từ DB (chỉ gọi ở luồng ngầm hoặc khi khởi tạo)."""
+    global CACHED_CHAR_NAMES
     try:
         db_path = os.path.join(get_app_dir(), TRACKER_DB)
         conn = sqlite3.connect(db_path, timeout=10.0)
         c = conn.cursor()
-        c.execute("SELECT char_name FROM characters ORDER BY last_updated DESC")
+        c.execute("SELECT char_name FROM characters ORDER BY last_updated DESC LIMIT 15000")
         rows = c.fetchall()
-        c.execute("SELECT DISTINCT old_name FROM name_history WHERE old_name IS NOT NULL")
-        old_rows = c.fetchall()
         conn.close()
-
-        seen = set()
-        result = []
-        for r in rows + old_rows:
-            name = (r[0] or "").strip()
-            if name and name.lower() not in seen:
-                seen.add(name.lower())
-                result.append(name)
-        return result
+        names = [r[0] for r in rows if r[0]]
+        with CACHE_LOCK:
+            CACHED_CHAR_NAMES = names
+        return names
     except Exception:
         return []
 
@@ -342,10 +323,15 @@ def is_autostart_enabled():
     except Exception:
         return False
 
+# ==================== TÍN HIỆU ĐỒNG BỘ LUỒNG NGẦM & UI ====================
+
 class MasterServerSignals(QObject):
     client_updated = pyqtSignal(dict)
     client_disconnected = pyqtSignal(str)
-    names_updated = pyqtSignal()
+    ip_info_updated = pyqtSignal(str, str, str)
+    completer_updated = pyqtSignal(list)
+
+# ==================== SOCKET SERVER QUẢN LÝ MÁY CON ====================
 
 class MasterServer(threading.Thread):
     def __init__(self, current_username, signals):
@@ -377,7 +363,7 @@ class MasterServer(threading.Thread):
         buffer = ""
         try:
             while self.running:
-                data = conn.recv(2048).decode('utf-8')
+                data = conn.recv(4096).decode('utf-8', errors='ignore')
                 if not data:
                     break
                 buffer += data
@@ -402,10 +388,10 @@ class MasterServer(threading.Thread):
                     with self.lock:
                         self.active_sockets[client_id] = conn
 
-                    qt_val = payload.get("qt", False)
+                    qt_val = payload.get("qt", payload.get("qt_status", False))
                     qt_status = qt_val if isinstance(qt_val, str) else ("ON" if qt_val else "OFF")
 
-                    tinker_val = payload.get("tinker", False)
+                    tinker_val = payload.get("tinker", payload.get("tinker_status", False))
                     tinker_status = tinker_val if isinstance(tinker_val, str) else ("ON" if tinker_val else "OFF")
 
                     node_data = {
@@ -442,6 +428,64 @@ class MasterServer(threading.Thread):
                 except Exception:
                     return False
         return False
+
+# ==================== LUỒNG NGẦM DUY TRÌ VPN TAILSCALE & TƯỜNG LỬA ====================
+
+class NetworkWatchdogThread(threading.Thread):
+    """
+    Chạy ngầm 100% ở Background Thread để khởi tạo VPN, mở Firewall và
+    tự động bật lại tailscaled.exe nếu bị tắt ngầm mà KHÔNG làm đơ giao diện.
+    """
+    def __init__(self, signals):
+        super().__init__(daemon=True)
+        self.signals = signals
+        self.running = True
+        self.ts = EmbeddedTailscale()
+
+    def is_tailscaled_running(self):
+        try:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            chk = subprocess.run(
+                'tasklist /FI "IMAGENAME eq tailscaled.exe"',
+                shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, startupinfo=startupinfo
+            )
+            return "tailscaled.exe" in chk.stdout.lower()
+        except Exception:
+            return False
+
+    def run(self):
+        # 1. Mở cổng Firewall và kết nối VPN ngay khi vào màn hình chính
+        setup_windows_firewall(SERVER_PORT)
+        self.ts.start_and_connect()
+        setup_windows_firewall(SERVER_PORT)
+
+        lan_ip, vpn_ip, wan_ip = get_machine_ips(self.ts)
+        self.signals.ip_info_updated.emit(lan_ip, vpn_ip, wan_ip)
+
+        # 2. Vòng lặp kiểm tra mỗi 20 giây ở luồng ngầm: nếu tailscaled bị tắt thì tự bật lại ngay
+        while self.running:
+            for _ in range(20):
+                if not self.running:
+                    return
+                time.sleep(1)
+
+            try:
+                if not self.is_tailscaled_running():
+                    self.ts.start_and_connect()
+                    setup_windows_firewall(SERVER_PORT)
+
+                curr_vpn = self.ts.get_my_ip()
+                if not curr_vpn:
+                    self.ts.start_and_connect()
+                    curr_vpn = self.ts.get_my_ip()
+
+                if curr_vpn and curr_vpn != vpn_ip:
+                    vpn_ip = curr_vpn
+                    self.signals.ip_info_updated.emit(lan_ip, vpn_ip, wan_ip)
+            except Exception:
+                pass
 
 # ==================== MODULE BÓC TÁCH MÁY CHỦ & DỮ LIỆU MIR4 ====================
 
@@ -635,7 +679,7 @@ def save_character_record(data_obj, conn=None):
     try:
         if conn is None:
             db_path = os.path.join(get_app_dir(), TRACKER_DB)
-            conn = sqlite3.connect(db_path, timeout=15.0)
+            conn = sqlite3.connect(db_path, timeout=20.0)
             should_close = True
 
         c = conn.cursor()
@@ -658,7 +702,7 @@ def save_character_record(data_obj, conn=None):
         row = c.fetchone()
 
         if not row:
-            # Kiểm tra phát hiện đổi tên: cùng Máy chủ + cùng Clan + cùng Lực chiến + cùng Hạng nhưng tên mới xuất hiện
+            # Đối chiếu phát hiện đổi tên nhân vật
             if server != "Chưa xác định" and power != "N/A":
                 c.execute("""
                     SELECT char_name FROM characters
@@ -727,28 +771,13 @@ def save_character_record(data_obj, conn=None):
         if should_close and conn:
             conn.close()
 
-# ==================== LUỒNG CÀO DỮ LIỆU FULL TRANG CHỦ MỖI 3 GIỜ ====================
+# ==================== LUỒNG CÀO DỮ LIỆU MỖI 3 GIỜ (ÊM, KHÔNG ĐƠ MÁY) ====================
 
 class Mir4FullCrawlerThread(threading.Thread):
     def __init__(self, signals=None):
         super().__init__(daemon=True)
         self.running = True
         self.signals = signals
-
-    def fetch_page(self, g_id, w_id, p, s_name, headers):
-        for r_type in (1000, 1):
-            url = f"https://forum.mir4global.com/rank?ranktype={r_type}&worldgroupid={g_id}&worldid={w_id}&page={p}"
-            try:
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    if resp.status == 200:
-                        content = resp.read().decode('utf-8', errors='ignore')
-                        records = parse_mir4_table_rows(content, target_server=s_name)
-                        if records:
-                            return records
-            except Exception:
-                pass
-        return []
 
     def run(self):
         headers = {
@@ -757,17 +786,20 @@ class Mir4FullCrawlerThread(threading.Thread):
             "Referer": "https://forum.mir4global.com/rank?ranktype=1"
         }
 
-        time.sleep(5)
+        # Nạp danh sách tên ban đầu ở luồng ngầm để UI không phải đọc DB
+        initial_names = load_char_names_from_db()
+        if self.signals and initial_names:
+            self.signals.completer_updated.emit(initial_names)
+
+        time.sleep(8)
 
         while self.running:
             try:
-                # Xóa dữ liệu quá 180 ngày trước mỗi chu kỳ
                 prune_old_tracker_records()
-
                 server_list = get_live_mir4_server_list()
                 db_path = os.path.join(get_app_dir(), TRACKER_DB)
 
-                for srv in server_list:
+                for srv_idx, srv in enumerate(server_list):
                     if not self.running:
                         break
                     g_id = srv["group_id"]
@@ -775,21 +807,24 @@ class Mir4FullCrawlerThread(threading.Thread):
                     s_name = srv["name"]
 
                     server_records = []
-                    with ThreadPoolExecutor(max_workers=5) as executor:
-                        futures = [
-                            executor.submit(self.fetch_page, g_id, w_id, p, s_name, headers)
-                            for p in range(1, 51)
-                        ]
-                        for fut in as_completed(futures):
-                            if not self.running:
-                                break
-                            try:
-                                rows = fut.result()
-                                if rows:
-                                    server_records.extend(rows)
-                            except Exception:
-                                pass
+                    for p in range(1, 51):
+                        if not self.running:
+                            break
+                        url = f"https://forum.mir4global.com/rank?ranktype=1000&worldgroupid={g_id}&worldid={w_id}&page={p}"
+                        try:
+                            req = urllib.request.Request(url, headers=headers)
+                            with urllib.request.urlopen(req, timeout=8) as resp:
+                                if resp.status == 200:
+                                    content = resp.read().decode('utf-8', errors='ignore')
+                                    rows = parse_mir4_table_rows(content, target_server=s_name)
+                                    if rows:
+                                        server_records.extend(rows)
+                        except Exception:
+                            pass
+                        # Nhường CPU cho giao diện chính luôn mượt 60 FPS
+                        time.sleep(0.25)
 
+                    # Ghi gọn 1 lần (Batch Transaction) sau khi quét xong 1 máy chủ
                     if server_records:
                         try:
                             conn = sqlite3.connect(db_path, timeout=30.0)
@@ -797,17 +832,21 @@ class Mir4FullCrawlerThread(threading.Thread):
                                 save_character_record(r, conn)
                             conn.commit()
                             conn.close()
-                            if self.signals:
-                                self.signals.names_updated.emit()
                         except Exception:
                             pass
 
-                    time.sleep(0.2)
+                    # Cập nhật danh sách gợi ý sau mỗi 5 máy chủ
+                    if (srv_idx + 1) % 5 == 0 and self.signals:
+                        updated_names = load_char_names_from_db()
+                        self.signals.completer_updated.emit(updated_names)
+
+                if self.signals:
+                    self.signals.completer_updated.emit(load_char_names_from_db())
 
             except Exception:
                 pass
 
-            # Chu kỳ cào tự động mỗi 3 giờ (108 * 100 giây = 10.800 giây = 3 giờ)
+            # Chu kỳ lặp lại sau mỗi 3 giờ (108 * 100 giây = 10.800 giây = 3 giờ)
             for _ in range(108):
                 if not self.running:
                     break
@@ -895,7 +934,7 @@ class Mir4QueryWorker(QThread):
             db_path = os.path.join(get_app_dir(), TRACKER_DB)
             data_source_label = "Dữ liệu đã lưu trên App (Cập nhật định kỳ 3h)"
 
-            # BƯỚC 1: Tìm kiếm trong SQLite nội bộ (kể cả tra cứu theo tên cũ đã đổi)
+            # BƯỚC 1: Tìm trong SQLite nội bộ
             try:
                 conn = sqlite3.connect(db_path, timeout=5.0)
                 c = conn.cursor()
@@ -937,13 +976,11 @@ class Mir4QueryWorker(QThread):
             except Exception:
                 pass
 
-            # BƯỚC 2: NẾU CHƯA CÓ TRONG DB -> TRUY VẤN TRỰC TIẾP TỪ TRANG CHỦ MIR4
+            # BƯỚC 2: Nếu chưa có trong CSDL App -> Lấy trực tiếp từ trang chủ MIR4
             if not found_data:
                 data_source_label = "Trực tiếp từ Trang Chủ MIR4 (Live Homepage)"
-
-                # 2.1: Quét nhanh qua tham số search trực tiếp trên trang chủ cho toàn bộ máy chủ (Đa luồng)
                 server_list = get_live_mir4_server_list()
-                with ThreadPoolExecutor(max_workers=12) as executor:
+                with ThreadPoolExecutor(max_workers=8) as executor:
                     futures = [
                         executor.submit(self.search_server_direct, srv, encoded_name, clean_search)
                         for srv in server_list
@@ -957,7 +994,7 @@ class Mir4QueryWorker(QThread):
                         except Exception:
                             pass
 
-            # 2.2: Kiểm tra thêm thông tin chi tiết từ cổng XDRACO / Trang chủ nếu có
+            # BƯỚC 3: Kiểm tra bổ sung qua API XDRACO / Trang chủ
             nft_data = self.query_xdraco_nft()
             if nft_data:
                 if not found_data:
@@ -971,7 +1008,7 @@ class Mir4QueryWorker(QThread):
                         found_data["char_class"] = nft_data["char_class"]
                     save_character_record(found_data)
 
-            # 2.3: Nếu trang chủ không lọc bằng query search cho server đó, quét các trang xếp hạng trong giới hạn thời gian
+            # BƯỚC 4: Quét các trang bảng xếp hạng nếu chưa thấy
             if not found_data:
                 server_list = get_live_mir4_server_list()
                 for srv in server_list:
@@ -1000,7 +1037,7 @@ class Mir4QueryWorker(QThread):
                     if found_data:
                         break
 
-            # BƯỚC 3: Lấy danh sách lịch sử THAY ĐỔI (Tối đa 5 lần thay đổi kèm thời gian)
+            # BƯỚC 5: Truy xuất lịch sử Máy chủ, Clan, Đổi tên (Tối đa 5 lần kèm thời gian)
             target_lookup = (found_data.get("name", self.char_name) if found_data else self.char_name).lower()
             servers = []
             clans = []
@@ -1010,15 +1047,13 @@ class Mir4QueryWorker(QThread):
                 c = conn.cursor()
                 
                 c.execute("SELECT server_name, timestamp FROM server_history WHERE LOWER(char_name) = ? ORDER BY id DESC", (target_lookup,))
-                raw_srv = c.fetchall()
-                for s_name, t_stamp in raw_srv:
+                for s_name, t_stamp in c.fetchall():
                     if s_name and s_name != "Chưa xác định":
                         if not servers or servers[-1][0].lower() != s_name.lower():
                             servers.append((s_name, t_stamp))
 
                 c.execute("SELECT clan_name, timestamp FROM clan_history WHERE LOWER(char_name) = ? ORDER BY id DESC", (target_lookup,))
-                raw_cln = c.fetchall()
-                for c_name, t_stamp in raw_cln:
+                for c_name, t_stamp in c.fetchall():
                     if c_name and c_name != "Không có Clan":
                         if not clans or clans[-1][0].lower() != c_name.lower():
                             clans.append((c_name, t_stamp))
@@ -1028,9 +1063,8 @@ class Mir4QueryWorker(QThread):
                     WHERE LOWER(char_name) = ? OR LOWER(old_name) = ? OR LOWER(new_name) = ?
                     ORDER BY id DESC
                 """, (target_lookup, clean_search, target_lookup))
-                raw_nm = c.fetchall()
                 seen_nm_pairs = set()
-                for o_nm, n_nm, t_stamp in raw_nm:
+                for o_nm, n_nm, t_stamp in c.fetchall():
                     pair_key = (o_nm.lower(), n_nm.lower(), t_stamp)
                     if pair_key not in seen_nm_pairs and o_nm.lower() != n_nm.lower():
                         seen_nm_pairs.add(pair_key)
@@ -1092,7 +1126,6 @@ class Mir4QueryWorker(QThread):
             out.append(f" CẬP NHẬT LÚC       : {last_updated}")
             out.append("======================================================================")
             
-            # --- LỊCH SỬ MÁY CHỦ (TỐI ĐA 5 LẦN THAY ĐỔI KÈM THỜI GIAN) ---
             out.append("\n[+] LỊCH SỬ MÁY CHỦ (SERVER HISTORY - TỐI ĐA 5 LẦN THAY ĐỔI):")
             out.append(f"  • Máy chủ hiện tại   : {current_server}")
             prev_servers = [
@@ -1105,7 +1138,6 @@ class Mir4QueryWorker(QThread):
             else:
                 out.append("  • Máy chủ trước đây  : Chưa ghi nhận thay đổi máy chủ")
 
-            # --- LỊCH SỬ CLAN (TỐI ĐA 5 LẦN THAY ĐỔI KÈM THỜI GIAN) ---
             out.append("\n[+] LỊCH SỬ CLAN (CLAN HISTORY - TỐI ĐA 5 LẦN THAY ĐỔI):")
             out.append(f"  • Clan hiện tại      : {current_clan}")
             prev_clans = [
@@ -1118,7 +1150,6 @@ class Mir4QueryWorker(QThread):
             else:
                 out.append("  • Clan trước đây     : Chưa ghi nhận thay đổi Clan")
 
-            # --- LỊCH SỬ ĐỔI TÊN (TỐI ĐA 5 LẦN THAY ĐỔI KÈM THỜI GIAN) ---
             out.append("\n[+] LỊCH SỬ ĐỔI TÊN (NAME HISTORY - TỐI ĐA 5 LẦN THAY ĐỔI):")
             if names_hist:
                 for idx, (o_name, n_name, t_stamp) in enumerate(names_hist[:5], 1):
@@ -1151,53 +1182,50 @@ class MasterAppWindow(QMainWindow):
         self.signals = MasterServerSignals()
         self.signals.client_updated.connect(self.update_client_row)
         self.signals.client_disconnected.connect(self.mark_client_offline)
-        self.signals.names_updated.connect(self.refresh_completer_names)
+        self.signals.ip_info_updated.connect(self.on_ip_info_updated)
+        self.signals.completer_updated.connect(self.on_completer_updated)
 
         self.worker = None
+        self.lan_ip = "Đang lấy IP..."
+        self.vpn_ip = "Đang kết nối VPN..."
+        self.wan_ip = ""
 
-        setup_windows_firewall(SERVER_PORT)
+        # 1. Khởi chạy Socket Server
         self.server = MasterServer(self.username, self.signals)
         self.server.start()
 
-        self.ts = EmbeddedTailscale()
-        self.ts.start_and_connect()
-        setup_windows_firewall(SERVER_PORT)
-        self.lan_ip, self.vpn_ip, self.wan_ip = get_machine_ips(self.ts)
+        # 2. Hiển thị giao diện ngay lập tức (0.1s), KHÔNG chạy lệnh chờ trên luồng UI
         self.init_ui()
 
+        # 3. Khởi chạy luồng ngầm quản lý VPN Tailscale & Firewall
+        self.net_watchdog = NetworkWatchdogThread(self.signals)
+        self.net_watchdog.start()
+
+        # 4. Khởi chạy luồng ngầm cào dữ liệu MIR4 định kỳ 3 giờ
         self.crawler_thread = Mir4FullCrawlerThread(self.signals)
         self.crawler_thread.start()
 
-        # Tự động kiểm tra lại tường lửa & làm mới IP VPN định kỳ để không bao giờ mất kết nối
-        self.vpn_keepalive_timer = QTimer(self)
-        self.vpn_keepalive_timer.timeout.connect(self.maintain_vpn_and_firewall)
-        self.vpn_keepalive_timer.start(30000)
+    def on_ip_info_updated(self, lan_ip, vpn_ip, wan_ip):
+        self.lan_ip = lan_ip
+        self.vpn_ip = vpn_ip
+        self.wan_ip = wan_ip
+        ip_info = f"LAN: <font color='#00e676'><b>{self.lan_ip}</b></font>"
+        if self.vpn_ip:
+            ip_info += f" | VPN TAILSCALE: <font color='#ffeb3b'><b>{self.vpn_ip}</b></font>"
+        if self.wan_ip:
+            ip_info += f" | WAN: <font color='#00e5ff'><b>{self.wan_ip}</b></font>"
+        self.user_lbl.setText(f"Tài khoản quản trị: <b><font color='#ffd700'>{self.username}</font></b> | IP Máy Chính ({ip_info}) | Port: <b>9999</b>")
 
-    def maintain_vpn_and_firewall(self):
+    def on_completer_updated(self, names_list):
         try:
-            if self.ts:
-                new_vpn = self.ts.get_my_ip()
-                if new_vpn and new_vpn != self.vpn_ip:
-                    self.vpn_ip = new_vpn
-                    ip_info = f"LAN: <font color='#00e676'><b>{self.lan_ip}</b></font>"
-                    if self.vpn_ip:
-                        ip_info += f" | VPN TAILSCALE: <font color='#ffeb3b'><b>{self.vpn_ip}</b></font>"
-                    if self.wan_ip:
-                        ip_info += f" | WAN: <font color='#00e5ff'><b>{self.wan_ip}</b></font>"
-                    self.user_lbl.setText(f"Tài khoản quản trị: <b><font color='#ffd700'>{self.username}</font></b> | IP Máy Chính ({ip_info}) | Port: <b>9999</b>")
-        except Exception:
-            pass
-
-    def refresh_completer_names(self):
-        try:
-            latest_names = get_searched_char_names()
-            if len(latest_names) != len(self.history_names):
-                self.history_names = latest_names
-                self.completer_model.setStringList(self.history_names)
+            self.history_names = list(names_list)
+            self.completer_model.setStringList(self.history_names)
         except Exception:
             pass
 
     def closeEvent(self, event):
+        self.net_watchdog.running = False
+        self.crawler_thread.running = False
         kill_tailscale_processes()
         event.accept()
 
@@ -1222,12 +1250,12 @@ class MasterAppWindow(QMainWindow):
             padding: 8px;
         """)
         ad_layout = QVBoxLayout(ad_banner)
-        ad_title = QLabel("★ PHẦM MỀM ĐƯỢC THIẾT KẾ DÀNH CHO NGƯỜI DÙNG TINKER (PHAMHUNG) ★")
+        ad_title = QLabel("★ HỆ THỐNG TRUY XUẤT THÔNG TIN TÀI KHOẢN THEO TÊN (PHAMHUNG) ★")
         ad_title.setFont(QFont("Segoe UI", 12, QFont.Bold))
         ad_title.setStyleSheet("color: #000000;")
         ad_title.setAlignment(Qt.AlignCenter)
         
-        ad_sub = QLabel("GIÁM SÁT-ĐIỀU KHIỂN ỨNG DỤNG MÁY CON (AUTO MỞ QT+TOOL+UPDATE GAME")
+        ad_sub = QLabel("Hỗ trợ đồng bộ đa máy con qua LAN/Internet | Liên hệ : ZL 0392771558")
         ad_sub.setFont(QFont("Segoe UI", 9, QFont.DemiBold))
         ad_sub.setStyleSheet("color: #111111;")
         ad_sub.setAlignment(Qt.AlignCenter)
@@ -1254,11 +1282,7 @@ class MasterAppWindow(QMainWindow):
         tab1_layout = QVBoxLayout(tab1_widget)
 
         top_bar = QHBoxLayout()
-        ip_info = f"LAN: <font color='#00e676'><b>{self.lan_ip}</b></font>"
-        if self.vpn_ip:
-            ip_info += f" | VPN TAILSCALE: <font color='#ffeb3b'><b>{self.vpn_ip}</b></font>"
-        if self.wan_ip:
-            ip_info += f" | WAN: <font color='#00e5ff'><b>{self.wan_ip}</b></font>"
+        ip_info = f"LAN: <font color='#00e676'><b>{self.lan_ip}</b></font> | VPN TAILSCALE: <font color='#ffeb3b'><b>{self.vpn_ip}</b></font>"
 
         self.user_lbl = QLabel(f"Tài khoản quản trị: <b><font color='#ffd700'>{self.username}</font></b> | IP Máy Chính ({ip_info}) | Port: <b>9999</b>")
         self.user_lbl.setFont(QFont("Segoe UI", 10))
@@ -1361,7 +1385,7 @@ class MasterAppWindow(QMainWindow):
 
         self.txt_char_search = QLineEdit()
         self.txt_char_search.setFixedHeight(38)
-        self.txt_char_search.setPlaceholderText("Nhập bất kỳ tên nhân vật nào (tự động gợi ý tên đã cào hoặc tìm trực tiếp từ trang chủ)...")
+        self.txt_char_search.setPlaceholderText("Nhập tên nhân vật (tự động gợi ý tên đã cào hoặc tìm trực tiếp từ trang chủ)...")
         self.txt_char_search.setStyleSheet("""
             QLineEdit {
                 padding: 6px 12px; 
@@ -1374,7 +1398,7 @@ class MasterAppWindow(QMainWindow):
         """)
         self.txt_char_search.returnPressed.connect(self.on_search_char_clicked)
 
-        self.history_names = get_searched_char_names()
+        self.history_names = []
         self.completer_model = QStringListModel(self.history_names)
         self.completer = QCompleter(self.completer_model, self)
         self.completer.setCaseSensitivity(Qt.CaseInsensitive)
@@ -1454,10 +1478,7 @@ class MasterAppWindow(QMainWindow):
             return
 
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu { background-color: #24242c; color: #ffffff; border: 1px solid #444; font-weight: bold; }
-            QMenu::item:selected { background-color: #c62828; color: #ffffff; }
-        """)
+        menu.setStyleSheet("QMenu { background-color: #24242c; color: #ffffff; border: 1px solid #444; font-weight: bold; } QMenu::item:selected { background-color: #c62828; color: #ffffff; }")
 
         action_update = QAction(f"🚀 UPDATE MIR4 (15 PHÚT) CHO {len(selected_rows)} MÁY", self)
         action_update.triggered.connect(lambda: self.execute_on_selected("UPDATE_MIR4"))
@@ -1594,12 +1615,15 @@ class MasterAppWindow(QMainWindow):
 class LoginWindow(QWidget):
     def __init__(self):
         super().__init__()
+        self.is_logged_in = False  # Cờ bảo vệ: Không tắt VPN khi chuyển sang MasterAppWindow
         self.pref_path = os.path.join(get_app_dir(), PREF_FILE)
         self.init_ui()
         self.load_remembered_credentials()
 
     def closeEvent(self, event):
-        kill_tailscale_processes()
+        # Chỉ tắt Tailscale nếu người dùng bấm X thoát ứng dụng tại màn hình đăng nhập
+        if not self.is_logged_in:
+            kill_tailscale_processes()
         event.accept()
 
     def init_ui(self):
@@ -1671,6 +1695,7 @@ class LoginWindow(QWidget):
         u = self.txt_user.text().strip().lower()
         p = self.txt_pass.text().strip()
         if authenticate_user(u, p):
+            self.is_logged_in = True
             self.save_credentials(u, p, self.chk_remember.isChecked())
             self.master_win = MasterAppWindow(u)
             self.master_win.show()
@@ -1688,7 +1713,6 @@ class LoginWindow(QWidget):
             QMessageBox.warning(self, "Lỗi", msg)
 
 if __name__ == "__main__":
-    setup_windows_firewall(SERVER_PORT)
     init_db()
     init_tracker_db()
     app = QApplication(sys.argv)
