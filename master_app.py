@@ -15,6 +15,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from embedded_tailscale import EmbeddedTailscale
 
@@ -38,6 +39,11 @@ if not is_admin():
     except Exception:
         pass
 
+def get_app_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
 def kill_tailscale_processes():
     try:
         startupinfo = subprocess.STARTUPINFO()
@@ -48,18 +54,68 @@ def kill_tailscale_processes():
         pass
 
 def setup_windows_firewall(port=9999):
-    rule_name = "AUTOGAME_Master_Socket_Server"
+    """
+    Mở toàn bộ cổng kết nối TCP/UDP, cổng VPN Tailscale (41641, 3478), ICMP Ping
+    và cấp quyền xuyên tường lửa trên mọi loại mạng (Domain, Private, Public).
+    """
     try:
-        chk_cmd = f'netsh advfirewall firewall show rule name="{rule_name}"'
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = subprocess.SW_HIDE
+
+        rules = [
+            f'netsh advfirewall firewall add rule name="AUTOGAME_Master_Socket_Server_TCP_IN" dir=in action=allow protocol=TCP localport={port} profile=any enable=yes',
+            f'netsh advfirewall firewall add rule name="AUTOGAME_Master_Socket_Server_TCP_OUT" dir=out action=allow protocol=TCP localport={port} profile=any enable=yes',
+            f'netsh advfirewall firewall add rule name="AUTOGAME_Master_Socket_Server_UDP_IN" dir=in action=allow protocol=UDP localport={port} profile=any enable=yes',
+            f'netsh advfirewall firewall add rule name="AUTOGAME_Master_Socket_Server_UDP_OUT" dir=out action=allow protocol=UDP localport={port} profile=any enable=yes',
+            f'netsh advfirewall firewall add rule name="Mir4_Master_Socket_Server" dir=in action=allow protocol=TCP localport={port} profile=any enable=yes',
+            f'netsh advfirewall firewall add rule name="AUTOGAME_Tailscale_WireGuard_IN" dir=in action=allow protocol=UDP localport=41641 profile=any enable=yes',
+            f'netsh advfirewall firewall add rule name="AUTOGAME_Tailscale_WireGuard_OUT" dir=out action=allow protocol=UDP localport=41641 profile=any enable=yes',
+            f'netsh advfirewall firewall add rule name="AUTOGAME_Tailscale_DERP_STUN" dir=in action=allow protocol=UDP localport=3478 profile=any enable=yes',
+            f'netsh advfirewall firewall add rule name="AUTOGAME_Tailscale_Subnet_IN" dir=in action=allow remoteip=100.64.0.0/10 profile=any enable=yes',
+            f'netsh advfirewall firewall add rule name="AUTOGAME_Tailscale_Subnet_OUT" dir=out action=allow remoteip=100.64.0.0/10 profile=any enable=yes',
+            f'netsh advfirewall firewall add rule name="AUTOGAME_ICMP_Ping_IN" dir=in action=allow protocol=icmpv4:8,any profile=any enable=yes'
+        ]
+
+        exe_curr = os.path.abspath(sys.executable)
+        rules.append(f'netsh advfirewall firewall add rule name="AUTOGAME_Master_App_Bin" dir=in action=allow program="{exe_curr}" profile=any enable=yes')
+        rules.append(f'netsh advfirewall firewall add rule name="AUTOGAME_Master_App_Bin_OUT" dir=out action=allow program="{exe_curr}" profile=any enable=yes')
+
+        candidate_dirs = [
+            os.path.join(get_app_dir(), "tailscale_bin"),
+            os.path.join(getattr(sys, '_MEIPASS', get_app_dir()), "tailscale_bin"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Temp")
+        ]
+        for d in candidate_dirs:
+            for bin_name in ("tailscaled.exe", "tailscale.exe"):
+                bin_path = os.path.join(d, bin_name)
+                if os.path.exists(bin_path):
+                    rules.append(f'netsh advfirewall firewall add rule name="AUTOGAME_VPN_{bin_name}_IN" dir=in action=allow program="{bin_path}" profile=any enable=yes')
+                    rules.append(f'netsh advfirewall firewall add rule name="AUTOGAME_VPN_{bin_name}_OUT" dir=out action=allow program="{bin_path}" profile=any enable=yes')
+
+        chk_cmd = 'netsh advfirewall firewall show rule name="AUTOGAME_Tailscale_Subnet_IN"'
         res = subprocess.run(chk_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
-        if res.returncode != 0 or rule_name.lower() not in res.stdout.decode('latin1', errors='ignore').lower():
-            in_cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=in action=allow protocol=TCP localport={port}'
-            out_cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=out action=allow protocol=TCP localport={port}'
-            subprocess.run(in_cmd, shell=True, startupinfo=startupinfo)
-            subprocess.run(out_cmd, shell=True, startupinfo=startupinfo)
+        if res.returncode != 0:
+            for cmd in rules:
+                subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
+        else:
+            # Đảm bảo cổng chính luôn mở trên mọi profile mạng (kể cả Public)
+            subprocess.run(rules[0], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
+            subprocess.run(rules[5], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
+            subprocess.run(rules[8], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
+
+        # Chuyển card mạng Tailscale sang chế độ Private để Windows không chặn khi dùng mạng Public
+        ps_cmd = 'powershell -NoProfile -WindowStyle Hidden -Command "Get-NetConnectionProfile | Where-Object {$_.InterfaceAlias -like \'*Tailscale*\'} | Set-NetConnectionProfile -NetworkCategory Private"'
+        subprocess.run(ps_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
+    except Exception:
+        pass
+
+def enable_socket_keepalive(sock):
+    """Giữ kết nối TCP xuyên NAT/VPN/Public Network không bị ngắt khi rảnh."""
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "SIO_KEEPALIVE_VALS"):
+            sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 15000, 5000))
     except Exception:
         pass
 
@@ -91,7 +147,7 @@ from PyQt5.QtWidgets import (
     QHeaderView, QMessageBox, QFrame, QCheckBox, QAbstractItemView,
     QMenu, QAction, QTabWidget, QTextEdit, QCompleter
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QObject, QThread, QStringListModel
+from PyQt5.QtCore import Qt, pyqtSignal, QObject, QThread, QStringListModel, QTimer
 from PyQt5.QtGui import QFont, QColor, QIcon
 
 SERVER_PORT = 9999
@@ -100,11 +156,6 @@ APP_NAME = "AUTOGAME_MasterManager"
 TASK_NAME = "AUTOGAME_MasterManager_AutoStart"
 PREF_FILE = "login_pref.json"
 TRACKER_DB = "mir4_tracker_history.db"
-
-def get_app_dir():
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
 
 def init_db():
     db_path = os.path.join(get_app_dir(), DB_NAME)
@@ -124,6 +175,7 @@ def init_tracker_db():
     conn = sqlite3.connect(db_path, timeout=30.0)
     c = conn.cursor()
     c.execute("PRAGMA journal_mode=WAL;")
+    c.execute("PRAGMA synchronous=NORMAL;")
     c.execute('''CREATE TABLE IF NOT EXISTS characters (
                     char_name TEXT PRIMARY KEY,
                     current_server TEXT,
@@ -131,8 +183,14 @@ def init_tracker_db():
                     rank TEXT,
                     power TEXT,
                     level TEXT,
-                    last_updated TEXT
+                    last_updated TEXT,
+                    char_class TEXT DEFAULT 'Chưa xác định'
                 )''')
+    try:
+        c.execute("ALTER TABLE characters ADD COLUMN char_class TEXT DEFAULT 'Chưa xác định'")
+    except Exception:
+        pass
+
     c.execute('''CREATE TABLE IF NOT EXISTS clan_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     char_name TEXT,
@@ -145,13 +203,23 @@ def init_tracker_db():
                     server_name TEXT,
                     timestamp TEXT
                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS name_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    char_name TEXT,
+                    old_name TEXT,
+                    new_name TEXT,
+                    timestamp TEXT
+                )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_char_name ON characters(char_name);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_char_srv_lookup ON characters(current_server, current_clan, power);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_char_clan_hist ON clan_history(char_name);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_char_srv_hist ON server_history(char_name);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_char_name_hist ON name_history(char_name);")
     conn.commit()
     conn.close()
 
 def prune_old_tracker_records(conn=None):
+    """Lưu trữ dữ liệu trong 180 ngày, tự động xóa dữ liệu cũ hơn 180 ngày."""
     should_close = False
     try:
         if conn is None:
@@ -160,9 +228,10 @@ def prune_old_tracker_records(conn=None):
             should_close = True
 
         c = conn.cursor()
-        c.execute("DELETE FROM clan_history WHERE timestamp < datetime('now', '-100 days')")
-        c.execute("DELETE FROM server_history WHERE timestamp < datetime('now', '-100 days')")
-        c.execute("DELETE FROM characters WHERE last_updated < datetime('now', '-100 days')")
+        c.execute("DELETE FROM clan_history WHERE timestamp < datetime('now', '-180 days')")
+        c.execute("DELETE FROM server_history WHERE timestamp < datetime('now', '-180 days')")
+        c.execute("DELETE FROM name_history WHERE timestamp < datetime('now', '-180 days')")
+        c.execute("DELETE FROM characters WHERE last_updated < datetime('now', '-180 days')")
         conn.commit()
     except Exception:
         pass
@@ -171,14 +240,25 @@ def prune_old_tracker_records(conn=None):
             conn.close()
 
 def get_searched_char_names():
+    """Lấy toàn bộ tên nhân vật đã được cào trong CSDL để hiển thị gợi ý khi gõ."""
     try:
         db_path = os.path.join(get_app_dir(), TRACKER_DB)
-        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn = sqlite3.connect(db_path, timeout=10.0)
         c = conn.cursor()
-        c.execute("SELECT char_name FROM characters ORDER BY last_updated DESC LIMIT 500")
+        c.execute("SELECT char_name FROM characters ORDER BY last_updated DESC")
         rows = c.fetchall()
+        c.execute("SELECT DISTINCT old_name FROM name_history WHERE old_name IS NOT NULL")
+        old_rows = c.fetchall()
         conn.close()
-        return [r[0] for r in rows if r[0]]
+
+        seen = set()
+        result = []
+        for r in rows + old_rows:
+            name = (r[0] or "").strip()
+            if name and name.lower() not in seen:
+                seen.add(name.lower())
+                result.append(name)
+        return result
     except Exception:
         return []
 
@@ -265,6 +345,7 @@ def is_autostart_enabled():
 class MasterServerSignals(QObject):
     client_updated = pyqtSignal(dict)
     client_disconnected = pyqtSignal(str)
+    names_updated = pyqtSignal()
 
 class MasterServer(threading.Thread):
     def __init__(self, current_username, signals):
@@ -279,12 +360,14 @@ class MasterServer(threading.Thread):
         self.running = True
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        enable_socket_keepalive(server)
         server.bind(('0.0.0.0', SERVER_PORT))
-        server.listen(100)
+        server.listen(200)
 
         while self.running:
             try:
                 conn, addr = server.accept()
+                enable_socket_keepalive(conn)
                 threading.Thread(target=self.handle_client, args=(conn, addr), daemon=True).start()
             except Exception:
                 break
@@ -339,9 +422,12 @@ class MasterServer(threading.Thread):
             pass
         finally:
             with self.lock:
-                if client_id in self.active_sockets:
+                if client_id in self.active_sockets and self.active_sockets[client_id] is conn:
                     del self.active_sockets[client_id]
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
             if client_id:
                 self.signals.client_disconnected.emit(client_id)
 
@@ -357,7 +443,41 @@ class MasterServer(threading.Thread):
                     return False
         return False
 
-# ==================== MODULE BÓC TÁCH MÁY CHỦ MIR4 ====================
+# ==================== MODULE BÓC TÁCH MÁY CHỦ & DỮ LIỆU MIR4 ====================
+
+MIR4_CLASS_MAP = {
+    "1": "Chiến Binh (Warrior)",
+    "2": "Pháp Sư (Sorcerer)",
+    "3": "Đạo Sĩ (Taoist)",
+    "4": "Cung Thủ (Arbalist)",
+    "5": "Võ Sĩ (Lancer)",
+    "6": "Hắc Đạo (Darkist)",
+    "warrior": "Chiến Binh (Warrior)",
+    "sorcerer": "Pháp Sư (Sorcerer)",
+    "taoist": "Đạo Sĩ (Taoist)",
+    "arbalist": "Cung Thủ (Arbalist)",
+    "lancer": "Võ Sĩ (Lancer)",
+    "darkist": "Hắc Đạo (Darkist)"
+}
+
+def extract_class_from_tr(tr_html):
+    try:
+        m = re.search(r'icon_class_([a-zA-Z0-9_]+)', tr_html, re.IGNORECASE)
+        if m:
+            key = m.group(1).lower()
+            for k, v in MIR4_CLASS_MAP.items():
+                if k in key:
+                    return v
+        m_alt = re.search(r'<img[^>]+alt=["\']([^"\']+)["\']', tr_html, re.IGNORECASE)
+        if m_alt:
+            alt_txt = m_alt.group(1).strip().lower()
+            if alt_txt in MIR4_CLASS_MAP:
+                return MIR4_CLASS_MAP[alt_txt]
+            elif alt_txt:
+                return m_alt.group(1).strip()
+    except Exception:
+        pass
+    return "Theo bảng xếp hạng"
 
 def get_live_mir4_server_list():
     headers = {
@@ -365,6 +485,7 @@ def get_live_mir4_server_list():
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
     }
     extracted_servers = []
+    seen_worlds = set()
     try:
         req = urllib.request.Request("https://forum.mir4global.com/rank?ranktype=1", headers=headers)
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -376,7 +497,8 @@ def get_live_mir4_server_list():
                 
                 for g_id, w_id, s_name in matches:
                     clean_name = s_name.strip()
-                    if clean_name and clean_name.lower() != "all":
+                    if clean_name and clean_name.lower() != "all" and int(w_id) not in seen_worlds:
+                        seen_worlds.add(int(w_id))
                         extracted_servers.append({
                             "group_id": int(g_id),
                             "world_id": int(w_id),
@@ -458,6 +580,10 @@ def parse_mir4_table_rows(html_content, target_server):
         tr_blocks = re.findall(r'<tr[^>]*>(.*?)</tr>', html_content, re.DOTALL | re.IGNORECASE)
         for tr in tr_blocks:
             td_texts = re.findall(r'<td[^>]*>(.*?)</td>', tr, re.DOTALL | re.IGNORECASE)
+            if not td_texts:
+                continue
+
+            char_class = extract_class_from_tr(tr)
             td_cleaned = []
             for td in td_texts:
                 clean_td = re.sub(r'<[^>]+>', ' ', td)
@@ -467,9 +593,12 @@ def parse_mir4_table_rows(html_content, target_server):
 
             if len(td_cleaned) >= 5:
                 rank_raw = td_cleaned[0].replace("NEW", "").strip()
+                rank_num_match = re.match(r'^([0-9]+)', rank_raw)
+                if rank_num_match:
+                    rank_raw = rank_num_match.group(1)
                 name = td_cleaned[1]
                 server = td_cleaned[2] if td_cleaned[2] else target_server
-                clan = td_cleaned[3] if td_cleaned[3] else "Không có Clan"
+                clan = td_cleaned[3] if td_cleaned[3] and td_cleaned[3] != "-" else "Không có Clan"
                 power = td_cleaned[4]
                 results.append({
                     "rank": rank_raw,
@@ -477,12 +606,16 @@ def parse_mir4_table_rows(html_content, target_server):
                     "server": server,
                     "clan": clan,
                     "power": power,
-                    "level": "Theo bảng Lực chiến"
+                    "level": "Theo bảng Lực chiến",
+                    "char_class": char_class
                 })
             elif len(td_cleaned) == 4:
                 rank_raw = td_cleaned[0].replace("NEW", "").strip()
+                rank_num_match = re.match(r'^([0-9]+)', rank_raw)
+                if rank_num_match:
+                    rank_raw = rank_num_match.group(1)
                 name = td_cleaned[1]
-                clan = td_cleaned[2] if td_cleaned[2] else "Không có Clan"
+                clan = td_cleaned[2] if td_cleaned[2] and td_cleaned[2] != "-" else "Không có Clan"
                 power = td_cleaned[3]
                 results.append({
                     "rank": rank_raw,
@@ -490,7 +623,8 @@ def parse_mir4_table_rows(html_content, target_server):
                     "server": target_server,
                     "clan": clan,
                     "power": power,
-                    "level": "Theo bảng Lực chiến"
+                    "level": "Theo bảng Lực chiến",
+                    "char_class": char_class
                 })
     except Exception:
         pass
@@ -501,7 +635,7 @@ def save_character_record(data_obj, conn=None):
     try:
         if conn is None:
             db_path = os.path.join(get_app_dir(), TRACKER_DB)
-            conn = sqlite3.connect(db_path, timeout=10.0)
+            conn = sqlite3.connect(db_path, timeout=15.0)
             should_close = True
 
         c = conn.cursor()
@@ -518,13 +652,39 @@ def save_character_record(data_obj, conn=None):
         rank = str(data_obj.get("rank", "N/A")).strip()
         power = str(data_obj.get("power", "N/A")).strip()
         level = str(data_obj.get("level", "N/A")).strip()
+        char_class = str(data_obj.get("char_class", "Theo bảng xếp hạng")).strip()
 
-        c.execute("SELECT current_server, current_clan FROM characters WHERE LOWER(char_name) = LOWER(?)", (c_name,))
+        c.execute("SELECT char_name, current_server, current_clan FROM characters WHERE LOWER(char_name) = LOWER(?)", (c_name,))
         row = c.fetchone()
 
         if not row:
-            c.execute("INSERT INTO characters VALUES (?, ?, ?, ?, ?, ?, ?)",
-                      (c_name, server, clan, rank, power, level, now_str))
+            # Kiểm tra phát hiện đổi tên: cùng Máy chủ + cùng Clan + cùng Lực chiến + cùng Hạng nhưng tên mới xuất hiện
+            if server != "Chưa xác định" and power != "N/A":
+                c.execute("""
+                    SELECT char_name FROM characters
+                    WHERE LOWER(current_server) = LOWER(?)
+                      AND LOWER(current_clan) = LOWER(?)
+                      AND power = ?
+                      AND rank = ?
+                      AND LOWER(char_name) != LOWER(?)
+                    ORDER BY last_updated DESC LIMIT 1
+                """, (server, clan, power, rank, c_name))
+                rename_candidate = c.fetchone()
+                if rename_candidate:
+                    old_char_name = rename_candidate[0]
+                    c.execute("SELECT old_name, new_name FROM name_history WHERE LOWER(char_name)=LOWER(?) ORDER BY id DESC LIMIT 1", (c_name,))
+                    last_rn = c.fetchone()
+                    if not last_rn or last_rn[1].lower() != c_name.lower():
+                        c.execute("INSERT INTO name_history (char_name, old_name, new_name, timestamp) VALUES (?, ?, ?, ?)",
+                                  (c_name, old_char_name, c_name, now_str))
+                        c.execute("INSERT INTO name_history (char_name, old_name, new_name, timestamp) VALUES (?, ?, ?, ?)",
+                                  (old_char_name, old_char_name, c_name, now_str))
+
+            c.execute("""
+                INSERT INTO characters (char_name, current_server, current_clan, rank, power, level, last_updated, char_class)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (c_name, server, clan, rank, power, level, now_str, char_class))
+
             if server and server != "Chưa xác định":
                 c.execute("INSERT INTO server_history (char_name, server_name, timestamp) VALUES (?, ?, ?)",
                           (c_name, server, now_str))
@@ -532,7 +692,14 @@ def save_character_record(data_obj, conn=None):
                 c.execute("INSERT INTO clan_history (char_name, clan_name, timestamp) VALUES (?, ?, ?)",
                           (c_name, clan, now_str))
         else:
-            old_server, old_clan = row
+            stored_name, old_server, old_clan = row
+            if stored_name != c_name:
+                c.execute("SELECT old_name, new_name FROM name_history WHERE LOWER(char_name)=LOWER(?) ORDER BY id DESC LIMIT 1", (c_name,))
+                last_rn = c.fetchone()
+                if not last_rn or last_rn[1] != c_name:
+                    c.execute("INSERT INTO name_history (char_name, old_name, new_name, timestamp) VALUES (?, ?, ?, ?)",
+                              (c_name, stored_name, c_name, now_str))
+
             if server and server != "Chưa xác định" and server.lower() != (old_server or "").lower():
                 c.execute("SELECT server_name FROM server_history WHERE LOWER(char_name)=LOWER(?) ORDER BY id DESC LIMIT 1", (c_name,))
                 last_srv = c.fetchone()
@@ -549,9 +716,9 @@ def save_character_record(data_obj, conn=None):
 
             c.execute("""
                 UPDATE characters 
-                SET current_server=?, current_clan=?, rank=?, power=?, level=?, last_updated=? 
+                SET char_name=?, current_server=?, current_clan=?, rank=?, power=?, level=?, last_updated=?, char_class=?
                 WHERE LOWER(char_name)=LOWER(?)
-            """, (server, clan, rank, power, level, now_str, c_name))
+            """, (c_name, server, clan, rank, power, level, now_str, char_class, c_name))
 
         if should_close:
             conn.commit()
@@ -560,12 +727,28 @@ def save_character_record(data_obj, conn=None):
         if should_close and conn:
             conn.close()
 
-# ==================== LUỒNG CÀO DỮ LIỆU TOP 1.000 / 12 GIỜ ====================
+# ==================== LUỒNG CÀO DỮ LIỆU FULL TRANG CHỦ MỖI 3 GIỜ ====================
 
 class Mir4FullCrawlerThread(threading.Thread):
-    def __init__(self):
+    def __init__(self, signals=None):
         super().__init__(daemon=True)
         self.running = True
+        self.signals = signals
+
+    def fetch_page(self, g_id, w_id, p, s_name, headers):
+        for r_type in (1000, 1):
+            url = f"https://forum.mir4global.com/rank?ranktype={r_type}&worldgroupid={g_id}&worldid={w_id}&page={p}"
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    if resp.status == 200:
+                        content = resp.read().decode('utf-8', errors='ignore')
+                        records = parse_mir4_table_rows(content, target_server=s_name)
+                        if records:
+                            return records
+            except Exception:
+                pass
+        return []
 
     def run(self):
         headers = {
@@ -574,15 +757,15 @@ class Mir4FullCrawlerThread(threading.Thread):
             "Referer": "https://forum.mir4global.com/rank?ranktype=1"
         }
 
-        time.sleep(10)
+        time.sleep(5)
 
         while self.running:
             try:
+                # Xóa dữ liệu quá 180 ngày trước mỗi chu kỳ
                 prune_old_tracker_records()
 
                 server_list = get_live_mir4_server_list()
                 db_path = os.path.join(get_app_dir(), TRACKER_DB)
-                conn = sqlite3.connect(db_path, timeout=30.0)
 
                 for srv in server_list:
                     if not self.running:
@@ -591,33 +774,46 @@ class Mir4FullCrawlerThread(threading.Thread):
                     w_id = srv["world_id"]
                     s_name = srv["name"]
 
-                    for p in range(1, 51):
-                        if not self.running:
-                            break
-                        url = f"https://forum.mir4global.com/rank?ranktype=1000&worldgroupid={g_id}&worldid={w_id}&page={p}"
+                    server_records = []
+                    with ThreadPoolExecutor(max_workers=5) as executor:
+                        futures = [
+                            executor.submit(self.fetch_page, g_id, w_id, p, s_name, headers)
+                            for p in range(1, 51)
+                        ]
+                        for fut in as_completed(futures):
+                            if not self.running:
+                                break
+                            try:
+                                rows = fut.result()
+                                if rows:
+                                    server_records.extend(rows)
+                            except Exception:
+                                pass
+
+                    if server_records:
                         try:
-                            req = urllib.request.Request(url, headers=headers)
-                            with urllib.request.urlopen(req, timeout=10) as resp:
-                                if resp.status == 200:
-                                    content = resp.read().decode('utf-8', errors='ignore')
-                                    records = parse_mir4_table_rows(content, target_server=s_name)
-                                    for r in records:
-                                        save_character_record(r, conn)
-                                    conn.commit()
+                            conn = sqlite3.connect(db_path, timeout=30.0)
+                            for r in server_records:
+                                save_character_record(r, conn)
+                            conn.commit()
+                            conn.close()
+                            if self.signals:
+                                self.signals.names_updated.emit()
                         except Exception:
                             pass
-                        time.sleep(0.3)
 
-                conn.close()
+                    time.sleep(0.2)
+
             except Exception:
                 pass
 
-            for _ in range(432):
+            # Chu kỳ cào tự động mỗi 3 giờ (108 * 100 giây = 10.800 giây = 3 giờ)
+            for _ in range(108):
                 if not self.running:
                     break
                 time.sleep(100)
 
-# ==================== LUỒNG TRUY VẤN TÌM KIẾM THEO TÊN (LIVE FALLBACK) ====================
+# ==================== LUỒNG TRUY VẤN TÌM KIẾM THEO TÊN (LIVE FALLBACK TỪ TRANG CHỦ) ====================
 
 class Mir4QueryWorker(QThread):
     finished = pyqtSignal(str, bool)
@@ -627,7 +823,7 @@ class Mir4QueryWorker(QThread):
         self.char_name = char_name.strip()
         self.search_timeout = 60
 
-    def fetch_url(self, url):
+    def fetch_url(self, url, timeout=5):
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -635,52 +831,152 @@ class Mir4QueryWorker(QThread):
         }
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=4) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 if resp.status == 200:
                     return resp.read().decode('utf-8', errors='ignore')
         except Exception:
             pass
         return ""
 
+    def search_server_direct(self, srv, encoded_name, clean_search):
+        g_id = srv["group_id"]
+        w_id = srv["world_id"]
+        s_name = srv["name"]
+        for r_type in (1, 1000):
+            url = f"https://forum.mir4global.com/rank?ranktype={r_type}&worldgroupid={g_id}&worldid={w_id}&search={encoded_name}"
+            html_code = self.fetch_url(url, timeout=5)
+            if html_code and clean_search in html_code.lower():
+                rows = parse_mir4_table_rows(html_code, target_server=s_name)
+                for r in rows:
+                    save_character_record(r)
+                    if r["name"].strip().lower() == clean_search:
+                        return r
+        return None
+
+    def query_xdraco_nft(self):
+        nft_url = f"https://webapi.mir4global.com/nft/character/search?characterName={urllib.parse.quote(self.char_name)}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://www.xdraco.com",
+            "Referer": "https://www.xdraco.com/"
+        }
+        try:
+            req = urllib.request.Request(nft_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    raw_json = json.loads(resp.read().decode('utf-8'))
+                    if raw_json and "data" in raw_json and raw_json["data"]:
+                        d = raw_json["data"]
+                        if isinstance(d, list) and len(d) > 0:
+                            d = d[0]
+                        if isinstance(d, dict):
+                            cls_code = str(d.get("class", ""))
+                            char_cls = MIR4_CLASS_MAP.get(cls_code, d.get("className", "Nhân vật NFT"))
+                            return {
+                                "rank": "Nhân vật NFT (XDRACO)",
+                                "name": d.get("characterName", self.char_name),
+                                "server": d.get("worldName", "ASIA"),
+                                "clan": d.get("clanName") or "Không có Clan",
+                                "power": f"{int(d.get('powerScore', 0)):,}" if str(d.get('powerScore', '')).isdigit() else str(d.get('powerScore', 'N/A')),
+                                "level": f"Lv.{d.get('level', 'N/A')}",
+                                "char_class": char_cls
+                            }
+        except Exception:
+            pass
+        return None
+
     def run(self):
         start_time = time.time()
         try:
             found_data = None
             clean_search = self.char_name.lower()
+            encoded_name = urllib.parse.quote(self.char_name)
             db_path = os.path.join(get_app_dir(), TRACKER_DB)
+            data_source_label = "Dữ liệu đã lưu trên App (Cập nhật định kỳ 3h)"
 
-            # BƯỚC 1: Tìm kiếm trong SQLite nội bộ
+            # BƯỚC 1: Tìm kiếm trong SQLite nội bộ (kể cả tra cứu theo tên cũ đã đổi)
             try:
-                conn = sqlite3.connect(db_path, timeout=3.0)
+                conn = sqlite3.connect(db_path, timeout=5.0)
                 c = conn.cursor()
                 c.execute("""
-                    SELECT current_server, current_clan, rank, power, level, last_updated 
+                    SELECT char_name, current_server, current_clan, rank, power, level, last_updated, char_class
                     FROM characters 
                     WHERE LOWER(char_name) = ? AND current_server != 'Chưa xác định'
                 """, (clean_search,))
                 row = c.fetchone()
+
+                if not row:
+                    c.execute("""
+                        SELECT new_name FROM name_history
+                        WHERE LOWER(old_name) = ?
+                        ORDER BY id DESC LIMIT 1
+                    """, (clean_search,))
+                    rn_row = c.fetchone()
+                    if rn_row and rn_row[0]:
+                        c.execute("""
+                            SELECT char_name, current_server, current_clan, rank, power, level, last_updated, char_class
+                            FROM characters 
+                            WHERE LOWER(char_name) = LOWER(?) AND current_server != 'Chưa xác định'
+                        """, (rn_row[0],))
+                        row = c.fetchone()
+
                 conn.close()
 
                 if row:
                     found_data = {
-                        "name": self.char_name,
-                        "server": row[0],
-                        "clan": row[1],
-                        "rank": row[2],
-                        "power": row[3],
-                        "level": row[4],
-                        "last_updated": row[5]
+                        "name": row[0],
+                        "server": row[1],
+                        "clan": row[2],
+                        "rank": row[3],
+                        "power": row[4],
+                        "level": row[5],
+                        "last_updated": row[6],
+                        "char_class": row[7] if len(row) > 7 and row[7] else "Theo bảng xếp hạng"
                     }
             except Exception:
                 pass
 
-            # BƯỚC 2: Quét trực tiếp trên web nếu SQLite chưa lưu (Timeout 60s)
+            # BƯỚC 2: NẾU CHƯA CÓ TRONG DB -> TRUY VẤN TRỰC TIẾP TỪ TRANG CHỦ MIR4
+            if not found_data:
+                data_source_label = "Trực tiếp từ Trang Chủ MIR4 (Live Homepage)"
+
+                # 2.1: Quét nhanh qua tham số search trực tiếp trên trang chủ cho toàn bộ máy chủ (Đa luồng)
+                server_list = get_live_mir4_server_list()
+                with ThreadPoolExecutor(max_workers=12) as executor:
+                    futures = [
+                        executor.submit(self.search_server_direct, srv, encoded_name, clean_search)
+                        for srv in server_list
+                    ]
+                    for fut in as_completed(futures):
+                        try:
+                            res = fut.result()
+                            if res:
+                                found_data = res
+                                break
+                        except Exception:
+                            pass
+
+            # 2.2: Kiểm tra thêm thông tin chi tiết từ cổng XDRACO / Trang chủ nếu có
+            nft_data = self.query_xdraco_nft()
+            if nft_data:
+                if not found_data:
+                    found_data = nft_data
+                    data_source_label = "Trực tiếp từ Trang Chủ MIR4 / XDRACO"
+                    save_character_record(found_data)
+                else:
+                    if found_data.get("level") in ("N/A", "Theo bảng Lực chiến") and nft_data.get("level"):
+                        found_data["level"] = nft_data["level"]
+                    if found_data.get("char_class") in ("N/A", "Theo bảng xếp hạng", "Chưa xác định") and nft_data.get("char_class"):
+                        found_data["char_class"] = nft_data["char_class"]
+                    save_character_record(found_data)
+
+            # 2.3: Nếu trang chủ không lọc bằng query search cho server đó, quét các trang xếp hạng trong giới hạn thời gian
             if not found_data:
                 server_list = get_live_mir4_server_list()
                 for srv in server_list:
                     if time.time() - start_time >= self.search_timeout:
                         break
-
                     g_id = srv["group_id"]
                     w_id = srv["world_id"]
                     s_name = srv["name"]
@@ -688,12 +984,10 @@ class Mir4QueryWorker(QThread):
                     for p in range(1, 51):
                         if time.time() - start_time >= self.search_timeout:
                             break
-
                         url = f"https://forum.mir4global.com/rank?ranktype=1000&worldgroupid={g_id}&worldid={w_id}&page={p}"
-                        html_code = self.fetch_url(url)
+                        html_code = self.fetch_url(url, timeout=4)
                         if not html_code:
                             continue
-
                         if clean_search in html_code.lower():
                             rows = parse_mir4_table_rows(html_code, target_server=s_name)
                             for r in rows:
@@ -703,58 +997,44 @@ class Mir4QueryWorker(QThread):
                                     break
                         if found_data:
                             break
-
                     if found_data:
                         break
 
-            # BƯỚC 3: Quét XDRACO nếu đã seal NFT
-            if not found_data and (time.time() - start_time < self.search_timeout):
-                nft_url = f"https://webapi.mir4global.com/nft/character/search?characterName={urllib.parse.quote(self.char_name)}"
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                    "Accept": "application/json, text/plain, */*",
-                    "Origin": "https://www.xdraco.com",
-                    "Referer": "https://www.xdraco.com/"
-                }
-                try:
-                    req = urllib.request.Request(nft_url, headers=headers)
-                    with urllib.request.urlopen(req, timeout=4) as resp:
-                        if resp.status == 200:
-                            raw_json = json.loads(resp.read().decode('utf-8'))
-                            if raw_json and "data" in raw_json and raw_json["data"]:
-                                d = raw_json["data"]
-                                found_data = {
-                                    "rank": "Nhân vật NFT (Đã Seal)",
-                                    "name": self.char_name,
-                                    "server": d.get("worldName", "ASIA"),
-                                    "clan": d.get("clanName", "Không có Clan"),
-                                    "power": f"{d.get('powerScore', 0):,}",
-                                    "level": f"Lv.{d.get('level', 0)}"
-                                }
-                                save_character_record(found_data)
-                except Exception:
-                    pass
-
-            # BƯỚC 4: Lấy danh sách lịch sử THAY ĐỔI
+            # BƯỚC 3: Lấy danh sách lịch sử THAY ĐỔI (Tối đa 5 lần thay đổi kèm thời gian)
+            target_lookup = (found_data.get("name", self.char_name) if found_data else self.char_name).lower()
             servers = []
             clans = []
+            names_hist = []
             try:
-                conn = sqlite3.connect(db_path, timeout=3.0)
+                conn = sqlite3.connect(db_path, timeout=5.0)
                 c = conn.cursor()
                 
-                c.execute("SELECT server_name, timestamp FROM server_history WHERE LOWER(char_name) = ? ORDER BY id DESC", (clean_search,))
+                c.execute("SELECT server_name, timestamp FROM server_history WHERE LOWER(char_name) = ? ORDER BY id DESC", (target_lookup,))
                 raw_srv = c.fetchall()
                 for s_name, t_stamp in raw_srv:
                     if s_name and s_name != "Chưa xác định":
                         if not servers or servers[-1][0].lower() != s_name.lower():
                             servers.append((s_name, t_stamp))
 
-                c.execute("SELECT clan_name, timestamp FROM clan_history WHERE LOWER(char_name) = ? ORDER BY id DESC", (clean_search,))
+                c.execute("SELECT clan_name, timestamp FROM clan_history WHERE LOWER(char_name) = ? ORDER BY id DESC", (target_lookup,))
                 raw_cln = c.fetchall()
                 for c_name, t_stamp in raw_cln:
                     if c_name and c_name != "Không có Clan":
                         if not clans or clans[-1][0].lower() != c_name.lower():
                             clans.append((c_name, t_stamp))
+
+                c.execute("""
+                    SELECT old_name, new_name, timestamp FROM name_history
+                    WHERE LOWER(char_name) = ? OR LOWER(old_name) = ? OR LOWER(new_name) = ?
+                    ORDER BY id DESC
+                """, (target_lookup, clean_search, target_lookup))
+                raw_nm = c.fetchall()
+                seen_nm_pairs = set()
+                for o_nm, n_nm, t_stamp in raw_nm:
+                    pair_key = (o_nm.lower(), n_nm.lower(), t_stamp)
+                    if pair_key not in seen_nm_pairs and o_nm.lower() != n_nm.lower():
+                        seen_nm_pairs.add(pair_key)
+                        names_hist.append((o_nm, n_nm, t_stamp))
 
                 conn.close()
             except Exception:
@@ -765,51 +1045,86 @@ class Mir4QueryWorker(QThread):
             success = False
             if found_data:
                 success = True
+                display_name = found_data.get("name", self.char_name)
                 level = found_data.get("level", "Theo bảng Lực chiến")
                 power = found_data.get("power", "N/A")
                 current_server = found_data.get("server", "Chưa xác định")
                 current_clan = found_data.get("clan", "Không có Clan")
                 ranking_rank = found_data.get("rank", "Chưa xếp hạng")
+                char_class = found_data.get("char_class", "Theo bảng xếp hạng")
+                last_updated = found_data.get("last_updated", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
             elif is_timeout:
+                display_name = self.char_name
                 level = "Hết thời gian tìm kiếm (Quá 1 phút)"
                 power = "Chưa tìm thấy dữ liệu tương thích"
                 current_server = "Chưa xác định"
                 current_clan = "Không có Clan"
                 ranking_rank = "Đã dừng quét tự động sau 60 giây"
+                char_class = "Chưa xác định"
+                last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             else:
+                display_name = self.char_name
                 level = "Chưa lọt Top 1000 Máy Chủ"
                 power = "Chưa lọt Top 1000 Máy Chủ"
                 current_server = "Chưa xác định"
                 current_clan = "Không có Clan"
                 ranking_rank = "Ngoài phạm vi bảng xếp hạng"
+                char_class = "Chưa xác định"
+                last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            if names_hist:
+                latest_o, latest_n, latest_t = names_hist[0]
+                rename_summary = f"{latest_o} ➔ {latest_n} ({latest_t})"
+            else:
+                rename_summary = "Chưa ghi nhận đổi tên"
 
             out = []
             out.append("======================================================================")
-            out.append(f" TÊN NHÂN VẬT       : {self.char_name}")
+            out.append(f" TÊN NHÂN VẬT       : {display_name}")
+            out.append(f" LỊCH SỬ ĐỔI TÊN    : {rename_summary}")
+            out.append(f" PHÁI (CLASS)       : {char_class}")
             out.append(f" THỨ HẠNG TRÊN RANK : {ranking_rank}")
             out.append(f" MÁY CHỦ HIỆN TẠI   : {current_server}")
             out.append(f" CLAN HIỆN TẠI      : {current_clan}")
             out.append(f" LỰC CHIẾN (PS)     : {power}")
             out.append(f" CẤP ĐỘ (LEVEL)     : {level}")
+            out.append(f" NGUỒN DỮ LIỆU      : {data_source_label}")
+            out.append(f" CẬP NHẬT LÚC       : {last_updated}")
             out.append("======================================================================")
             
-            out.append("\n[+] LỊCH SỬ MÁY CHỦ (SERVER HISTORY):")
+            # --- LỊCH SỬ MÁY CHỦ (TỐI ĐA 5 LẦN THAY ĐỔI KÈM THỜI GIAN) ---
+            out.append("\n[+] LỊCH SỬ MÁY CHỦ (SERVER HISTORY - TỐI ĐA 5 LẦN THAY ĐỔI):")
             out.append(f"  • Máy chủ hiện tại   : {current_server}")
-            prev_server_line = "Chưa ghi nhận thay đổi máy chủ"
-            for s_name, t_stamp in servers:
-                if s_name.strip().lower() != current_server.strip().lower() and s_name != "Chưa xác định":
-                    prev_server_line = f"{s_name:<18} - {t_stamp}"
-                    break
-            out.append(f"  • Máy chủ trước đây  : {prev_server_line}")
+            prev_servers = [
+                (s_name, t_stamp) for s_name, t_stamp in servers
+                if s_name.strip().lower() != current_server.strip().lower() and s_name != "Chưa xác định"
+            ][:5]
+            if prev_servers:
+                for idx, (s_name, t_stamp) in enumerate(prev_servers, 1):
+                    out.append(f"  • Lần đổi {idx:<2}         : {s_name:<18} (Thời gian: {t_stamp})")
+            else:
+                out.append("  • Máy chủ trước đây  : Chưa ghi nhận thay đổi máy chủ")
 
-            out.append("\n[+] LỊCH SỬ CLAN (CLAN HISTORY):")
+            # --- LỊCH SỬ CLAN (TỐI ĐA 5 LẦN THAY ĐỔI KÈM THỜI GIAN) ---
+            out.append("\n[+] LỊCH SỬ CLAN (CLAN HISTORY - TỐI ĐA 5 LẦN THAY ĐỔI):")
             out.append(f"  • Clan hiện tại      : {current_clan}")
-            prev_clan_line = "Chưa ghi nhận thay đổi Clan"
-            for c_name, t_stamp in clans:
-                if c_name.strip().lower() != current_clan.strip().lower() and c_name != "Không có Clan":
-                    prev_clan_line = f"{c_name:<18} - {t_stamp}"
-                    break
-            out.append(f"  • Clan trước đây     : {prev_clan_line}")
+            prev_clans = [
+                (c_name, t_stamp) for c_name, t_stamp in clans
+                if c_name.strip().lower() != current_clan.strip().lower() and c_name != "Không có Clan"
+            ][:5]
+            if prev_clans:
+                for idx, (c_name, t_stamp) in enumerate(prev_clans, 1):
+                    out.append(f"  • Lần đổi {idx:<2}         : {c_name:<18} (Thời gian: {t_stamp})")
+            else:
+                out.append("  • Clan trước đây     : Chưa ghi nhận thay đổi Clan")
+
+            # --- LỊCH SỬ ĐỔI TÊN (TỐI ĐA 5 LẦN THAY ĐỔI KÈM THỜI GIAN) ---
+            out.append("\n[+] LỊCH SỬ ĐỔI TÊN (NAME HISTORY - TỐI ĐA 5 LẦN THAY ĐỔI):")
+            if names_hist:
+                for idx, (o_name, n_name, t_stamp) in enumerate(names_hist[:5], 1):
+                    out.append(f"  • Lần đổi {idx:<2}         : {o_name} ➔ {n_name} (Thời gian: {t_stamp})")
+            else:
+                out.append("  • Chưa ghi nhận lịch sử đổi tên")
 
             if is_timeout:
                 out.append("\n[!] THÔNG BÁO: Đã hết thời gian tìm kiếm tối đa (1 phút).")
@@ -836,19 +1151,51 @@ class MasterAppWindow(QMainWindow):
         self.signals = MasterServerSignals()
         self.signals.client_updated.connect(self.update_client_row)
         self.signals.client_disconnected.connect(self.mark_client_offline)
+        self.signals.names_updated.connect(self.refresh_completer_names)
 
         self.worker = None
 
+        setup_windows_firewall(SERVER_PORT)
         self.server = MasterServer(self.username, self.signals)
         self.server.start()
 
         self.ts = EmbeddedTailscale()
         self.ts.start_and_connect()
+        setup_windows_firewall(SERVER_PORT)
         self.lan_ip, self.vpn_ip, self.wan_ip = get_machine_ips(self.ts)
         self.init_ui()
 
-        self.crawler_thread = Mir4FullCrawlerThread()
+        self.crawler_thread = Mir4FullCrawlerThread(self.signals)
         self.crawler_thread.start()
+
+        # Tự động kiểm tra lại tường lửa & làm mới IP VPN định kỳ để không bao giờ mất kết nối
+        self.vpn_keepalive_timer = QTimer(self)
+        self.vpn_keepalive_timer.timeout.connect(self.maintain_vpn_and_firewall)
+        self.vpn_keepalive_timer.start(30000)
+
+    def maintain_vpn_and_firewall(self):
+        try:
+            if self.ts:
+                new_vpn = self.ts.get_my_ip()
+                if new_vpn and new_vpn != self.vpn_ip:
+                    self.vpn_ip = new_vpn
+                    ip_info = f"LAN: <font color='#00e676'><b>{self.lan_ip}</b></font>"
+                    if self.vpn_ip:
+                        ip_info += f" | VPN TAILSCALE: <font color='#ffeb3b'><b>{self.vpn_ip}</b></font>"
+                    if self.wan_ip:
+                        ip_info += f" | WAN: <font color='#00e5ff'><b>{self.wan_ip}</b></font>"
+                    self.user_lbl.setText(f"Tài khoản quản trị: <b><font color='#ffd700'>{self.username}</font></b> | IP Máy Chính ({ip_info}) | Port: <b>9999</b>")
+        except Exception:
+            pass
+
+    def refresh_completer_names(self):
+        try:
+            latest_names = get_searched_char_names()
+            if len(latest_names) != len(self.history_names):
+                self.history_names = latest_names
+                self.completer_model.setStringList(self.history_names)
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         kill_tailscale_processes()
@@ -913,9 +1260,9 @@ class MasterAppWindow(QMainWindow):
         if self.wan_ip:
             ip_info += f" | WAN: <font color='#00e5ff'><b>{self.wan_ip}</b></font>"
 
-        user_lbl = QLabel(f"Tài khoản quản trị: <b><font color='#ffd700'>{self.username}</font></b> | IP Máy Chính ({ip_info}) | Port: <b>9999</b>")
-        user_lbl.setFont(QFont("Segoe UI", 10))
-        top_bar.addWidget(user_lbl)
+        self.user_lbl = QLabel(f"Tài khoản quản trị: <b><font color='#ffd700'>{self.username}</font></b> | IP Máy Chính ({ip_info}) | Port: <b>9999</b>")
+        self.user_lbl.setFont(QFont("Segoe UI", 10))
+        top_bar.addWidget(self.user_lbl)
 
         top_bar.addStretch()
 
@@ -1014,7 +1361,7 @@ class MasterAppWindow(QMainWindow):
 
         self.txt_char_search = QLineEdit()
         self.txt_char_search.setFixedHeight(38)
-        self.txt_char_search.setPlaceholderText("Nhập tên nhân vật (ví dụ: MOEMATSUKA1)...")
+        self.txt_char_search.setPlaceholderText("Nhập bất kỳ tên nhân vật nào (tự động gợi ý tên đã cào hoặc tìm trực tiếp từ trang chủ)...")
         self.txt_char_search.setStyleSheet("""
             QLineEdit {
                 padding: 6px 12px; 
@@ -1032,6 +1379,18 @@ class MasterAppWindow(QMainWindow):
         self.completer = QCompleter(self.completer_model, self)
         self.completer.setCaseSensitivity(Qt.CaseInsensitive)
         self.completer.setFilterMode(Qt.MatchContains)
+        self.completer.setMaxVisibleItems(15)
+        self.completer.popup().setStyleSheet("""
+            QListView {
+                background-color: #24242c;
+                color: #00e676;
+                border: 1px solid #ff6600;
+                font-size: 13px;
+                font-weight: bold;
+                selection-background-color: #ff6600;
+                selection-color: #ffffff;
+            }
+        """)
         self.txt_char_search.setCompleter(self.completer)
         search_box.addWidget(self.txt_char_search)
 
@@ -1043,7 +1402,7 @@ class MasterAppWindow(QMainWindow):
 
         tab2_layout.addLayout(search_box)
 
-        lbl_res_header = QLabel("THÔNG TIN CHI TIẾT TỪ TRANG CHỦ & RANKING MIR4:")
+        lbl_res_header = QLabel("THÔNG TIN CHI TIẾT TỪ TRANG CHỦ & RANKING MIR4 (LƯU TRỮ 180 NGÀY - CẬP NHẬT MỖI 3 GIỜ):")
         lbl_res_header.setFont(QFont("Segoe UI", 10, QFont.Bold))
         lbl_res_header.setStyleSheet("color: #d4af37;")
         tab2_layout.addWidget(lbl_res_header)
@@ -1064,8 +1423,12 @@ class MasterAppWindow(QMainWindow):
             return
 
         self.btn_search_char.setEnabled(False)
-        self.btn_search_char.setText("Đang tìm (Tối đa 1p)...")
-        self.txt_char_details.setText(f"[*] Đang truy xuất thông tin nhân vật [{name}]...\n(Nếu không tìm thấy sau 60 giây, hệ thống sẽ tự động dừng).")
+        self.btn_search_char.setText("Đang tìm...")
+        self.txt_char_details.setText(
+            f"[*] Đang truy xuất thông tin nhân vật [{name}]...\n"
+            f"    - Kiểm tra dữ liệu đã cào trong CSDL (Lưu trữ 180 ngày).\n"
+            f"    - Nếu chưa có trong App, hệ thống sẽ lấy trực tiếp từ trang chủ MIR4."
+        )
 
         if self.worker is not None and self.worker.isRunning():
             self.worker.terminate()
@@ -1081,7 +1444,7 @@ class MasterAppWindow(QMainWindow):
         self.btn_search_char.setText("🔍 TÌM KIẾM")
 
         name = self.txt_char_search.text().strip()
-        if name and name not in self.history_names:
+        if name and all(name.lower() != x.lower() for x in self.history_names):
             self.history_names.insert(0, name)
             self.completer_model.setStringList(self.history_names)
 
